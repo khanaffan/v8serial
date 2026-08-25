@@ -33,6 +33,24 @@
       "msvs_settings": {
         "VCCLCompilerTool": { "ExceptionHandling": 1 }
       }
+    },
+    {
+      "target_name": "v8serial_native_bench",
+      "type": "executable",
+      "sources": [ "bench/native_bench.cc" ],
+      "include_dirs": [ "include" ],
+      "cflags_cc": [ "-std=c++17", "-O3", "-fexceptions" ],
+      "xcode_settings": {
+        "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
+        "GCC_OPTIMIZATION_LEVEL": "3",
+        "GCC_ENABLE_CPP_EXCEPTIONS": "YES"
+      },
+      "msvs_settings": {
+        "VCCLCompilerTool": {
+          "ExceptionHandling": 1,
+          "Optimization": 2
+        }
+      }
     }
   ]
 }

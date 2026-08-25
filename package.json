@@ -12,7 +12,9 @@
     "pretest": "npm run build",
     "test": "node --test test/*.test.js",
     "probe": "node test/format_probe.js",
-    "bench": "node bench/bench.js"
+    "prebench": "npm run build",
+    "bench": "node --expose-gc bench/bench.js",
+    "bench:render": "node bench/bench.js --render-only"
   },
   "dependencies": {
     "node-addon-api": "8.9.2"

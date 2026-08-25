@@ -133,6 +133,10 @@ npm test
 npm run bench
 ```
 
+See the generated [performance report](docs/performance.md) for comparisons
+between the direct C++ headers, addon bridge, Node's V8 codec, JSON byte arrays,
+and JSON base64 across scalar, geometry, collection, and blob payloads.
+
 The test suite includes source-derived golden vectors, differential checks
 against Node's V8 implementation, deterministic generated value trees,
 malformed and truncated input, async concurrency and worker teardown, plus a
