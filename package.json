@@ -1,0 +1,23 @@
+{
+  "name": "v8serial",
+  "version": "0.1.0",
+  "description": "V8 serialization-format reader and writer for C++ without linking V8",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.js",
+    "probe": "node test/format_probe.js",
+    "bench": "node bench/bench.js"
+  },
+  "dependencies": {
+    "node-addon-api": "8.9.2"
+  },
+  "devDependencies": {
+    "node-gyp": "11.5.0"
+  }
+}
