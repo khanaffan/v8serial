@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "v8serial/detail/simd.hpp"
+
 namespace v8serial {
 
 /// Discriminator selecting the active payload in DecodedValue.
@@ -188,11 +190,9 @@ class Reader {
   std::u16string readOneByteString() {
     const uint32_t length = readVarint();
     if (length > remaining()) fail("one-byte string exceeds input");
-    std::u16string output;
-    output.reserve(length);
-    for (uint32_t index = 0; index < length; ++index) {
-      output.push_back(static_cast<char16_t>(readByte()));
-    }
+    std::u16string output(length, u'\0');
+    detail::widenLatin1(current_, output.data(), length);
+    current_ += length;
     return output;
   }
 

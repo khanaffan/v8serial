@@ -128,6 +128,23 @@ void TestNativeViewWithOffset() {
   assert(decoded.binary == std::vector<uint8_t>({1, 2, 3}));
 }
 
+void TestLongStringPaths() {
+  const std::u16string latin1(4096, u'\xe9');
+  v8serial::Writer latin1_writer(latin1.size() + 16);
+  latin1_writer.string(latin1);
+  const std::vector<uint8_t> latin1_encoded = latin1_writer.take();
+  assert(latin1_encoded[2] == '"');
+  assert(v8serial::Reader(latin1_encoded).read().string == latin1);
+
+  std::u16string two_byte(33, u'\xff');
+  two_byte[17] = u'\u0100';
+  v8serial::Writer two_byte_writer;
+  two_byte_writer.string(two_byte);
+  const std::vector<uint8_t> two_byte_encoded = two_byte_writer.take();
+  assert(two_byte_encoded[2] == 'c');
+  assert(v8serial::Reader(two_byte_encoded).read().string == two_byte);
+}
+
 }  // namespace
 
 int main() {
@@ -135,4 +152,5 @@ int main() {
   TestWriterInvariants();
   TestReaderValidation();
   TestNativeViewWithOffset();
+  TestLongStringPaths();
 }

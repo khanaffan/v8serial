@@ -149,6 +149,13 @@ std::vector<uint8_t> EncodePoints100() {
   return writer.take();
 }
 
+std::vector<uint8_t> EncodeLatin1() {
+  static const std::u16string text(4096, u'\xe9');
+  v8serial::Writer writer(text.size() + 16);
+  writer.string(text);
+  return writer.take();
+}
+
 std::vector<uint8_t> EncodeBlob(size_t size) {
   const std::vector<uint8_t>& blob = Blob(size);
   v8serial::Writer writer(size + 32);
@@ -215,6 +222,7 @@ int main() {
       {"geometry", EncodeGeometry, 30000},
       {"geometry-64b", EncodeGeometry64, 30000},
       {"points-100", EncodePoints100, 2000},
+      {"latin1-4k", EncodeLatin1, 50000},
       {"blob-1k", EncodeBlob1k, 20000},
       {"blob-1m", EncodeBlob1m, 50},
   };

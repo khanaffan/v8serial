@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "v8serial/detail/simd.hpp"
+
 namespace v8serial {
 
 /// Writes one value using the supported subset of V8 wire format version 15.
@@ -254,18 +256,12 @@ class Writer {
   }
 
   void rawUtf16(std::u16string_view value) {
-    bool one_byte = true;
-    for (char16_t code_unit : value) {
-      if (code_unit > 0xff) {
-        one_byte = false;
-        break;
-      }
-    }
-
-    if (one_byte) {
+    if (detail::allLatin1(value.data(), value.size())) {
       byte('"');
       checkedVarint(value.size());
-      for (char16_t code_unit : value) byte(static_cast<uint8_t>(code_unit));
+      const size_t offset = bytes_.size();
+      bytes_.resize(offset + value.size());
+      detail::narrowLatin1(value.data(), bytes_.data() + offset, value.size());
       return;
     }
 

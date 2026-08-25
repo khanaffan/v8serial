@@ -60,6 +60,10 @@ alive until `read()` returns. It requires a version-15 header, consumes exactly
 one value, validates lengths and terminal counts, and throws
 `v8serial::DecodeError` for malformed or unsupported input.
 
+Long Latin-1 strings use NEON on AArch64 and SSE2 on x86-64 for UTF-16
+classification and conversion. Other targets use the same scalar code path
+without requiring architecture-specific compiler flags.
+
 Arrays require their dense length up front:
 
 ```cpp

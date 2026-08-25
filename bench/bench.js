@@ -9,14 +9,13 @@ const v8 = require('node:v8');
 const { decodeSync, encodeSync } = require('..');
 
 const root = path.resolve(__dirname, '..');
-const nativeExecutable = path.join(
-  root,
-  'build',
-  'Release',
-  process.platform === 'win32'
-    ? 'v8serial_native_bench.exe'
-    : 'v8serial_native_bench',
-);
+const nativeExecutable = (target) =>
+  path.join(
+    root,
+    'build',
+    'Release',
+    process.platform === 'win32' ? `${target}.exe` : target,
+  );
 
 let sink = 0;
 
@@ -73,6 +72,12 @@ const scenarios = [
       z: index * 2,
     })),
     iterations: 1_500,
+  },
+  {
+    id: 'latin1-4k',
+    label: '4 KiB Latin-1 string',
+    value: '\xe9'.repeat(4096),
+    iterations: 10_000,
   },
   {
     id: 'blob-1k',
@@ -175,14 +180,14 @@ function benchmarkCodec(scenario, codec, encode, decode) {
   };
 }
 
-function readNativeResults() {
-  const output = execFileSync(nativeExecutable, [], { encoding: 'utf8' });
+function readNativeResults(executable, codec) {
+  const output = execFileSync(executable, [], { encoding: 'utf8' });
   const results = new Map();
   for (const line of output.trim().split('\n')) {
     const [scenario, encodeNs, decodeNs, wireBytes] = line.split('\t');
     results.set(scenario, {
       scenario,
-      codec: 'C++ headers',
+      codec,
       encode_ns: Number(encodeNs),
       decode_ns: Number(decodeNs),
       roundtrip_ns: Number(encodeNs) + Number(decodeNs),
@@ -213,7 +218,8 @@ function escapeXml(text) {
 }
 
 const colors = {
-  'C++ headers': '#0969da',
+  'C++ headers (SIMD)': '#0969da',
+  'C++ headers (scalar)': '#6e7781',
   'v8serial addon': '#54aeff',
   'Node v8': '#8250df',
   'JSON text': '#1a7f37',
@@ -299,12 +305,14 @@ function renderMarkdown(report) {
     );
   const faster = (baseline, candidate) =>
     (baseline.roundtrip_ns / candidate.roundtrip_ns).toFixed(1);
-  const geometryHeaders = result('geometry-64b', 'C++ headers');
+  const geometryHeaders = result('geometry-64b', 'C++ headers (SIMD)');
   const geometryAddon = result('geometry-64b', 'v8serial addon');
   const geometryBase64 = result('geometry-64b', 'JSON base64');
-  const blobHeaders = result('blob-1m', 'C++ headers');
+  const blobHeaders = result('blob-1m', 'C++ headers (SIMD)');
   const blobAddon = result('blob-1m', 'v8serial addon');
   const blobBase64 = result('blob-1m', 'JSON base64');
+  const latin1Simd = result('latin1-4k', 'C++ headers (SIMD)');
+  const latin1Scalar = result('latin1-4k', 'C++ headers (scalar)');
 
   const lines = [
     '# Performance',
@@ -318,7 +326,8 @@ function renderMarkdown(report) {
     '- Seven timed rounds per operation; tables report the median nanoseconds per operation.',
     '- Every operation is warmed up first and its result is consumed.',
     '- Encode and decode are measured separately; round trip is the sum of their medians.',
-    '- `C++ headers` calls `Writer` and `Reader` directly with native values and has no JavaScript/N-API traversal.',
+    '- `C++ headers (SIMD)` calls `Writer` and `Reader` directly with native values and enables the architecture-specific string paths.',
+    '- `C++ headers (scalar)` builds the same benchmark with `V8SERIAL_DISABLE_SIMD=1` for a like-for-like baseline.',
     '- `v8serial addon` includes generic JavaScript object traversal and N-API boundary cost.',
     '- `Node v8` is Node.js `v8.serialize()` and `v8.deserialize()`.',
     '- `JSON text` applies only to payloads without binary values.',
@@ -330,6 +339,7 @@ function renderMarkdown(report) {
     '## Highlights',
     '',
     '- JSON text is fastest for scalar and small plain JavaScript values because V8 has highly optimized built-in JSON paths.',
+    `- SIMD makes the 4 KiB Latin-1 native round trip ${faster(latin1Scalar, latin1Simd)}x faster than the scalar path.`,
     `- For geometry with a 64-byte blob, direct C++ headers are ${faster(geometryBase64, geometryHeaders)}x faster than JSON base64. The generic addon bridge is ${(geometryAddon.roundtrip_ns / geometryBase64.roundtrip_ns).toFixed(1)}x the JSON-base64 latency because JavaScript property traversal dominates this small payload.`,
     `- For a 1 MiB blob, direct C++ headers are ${faster(blobBase64, blobHeaders)}x faster and the addon bridge is ${faster(blobBase64, blobAddon)}x faster than JSON base64, while avoiding base64's wire-size expansion.`,
     '- Node V8 is exceptionally fast for large typed arrays because its host-object deserializer may return a view into the serialized input; the standalone reader instead returns owning native bytes.',
@@ -390,14 +400,25 @@ if (process.argv.includes('--render-only')) {
   process.exit(0);
 }
 
-const nativeResults = readNativeResults();
+const nativeResultSets = [
+  readNativeResults(
+    nativeExecutable('v8serial_native_bench'),
+    'C++ headers (SIMD)',
+  ),
+  readNativeResults(
+    nativeExecutable('v8serial_native_bench_scalar'),
+    'C++ headers (scalar)',
+  ),
+];
 const results = [];
 
 for (const scenario of scenarios) {
-  const native = nativeResults.get(scenario.id);
-  if (!native) throw new Error(`missing native result for ${scenario.id}`);
-  native.label = scenario.label;
-  results.push(native);
+  for (const nativeResults of nativeResultSets) {
+    const native = nativeResults.get(scenario.id);
+    if (!native) throw new Error(`missing native result for ${scenario.id}`);
+    native.label = scenario.label;
+    results.push(native);
+  }
   results.push(
     benchmarkCodec(scenario, 'v8serial addon', encodeSync, decodeSync),
     benchmarkCodec(scenario, 'Node v8', v8.serialize, v8.deserialize),
