@@ -189,6 +189,73 @@ void TestLongStringPaths() {
   assert(v8serial::Reader(two_byte_encoded).read().string == two_byte);
 }
 
+void TestWriterResetReuse() {
+  v8serial::Writer writer;
+  writer.int32(1);
+  assert(writer.size() > 2);  // header plus the encoded int32 tag/varint.
+
+  const std::vector<uint8_t> first(writer.data(), writer.data() + writer.size());
+  writer.reset();
+
+  // Header is re-emitted immediately after reset(), before any value.
+  assert(writer.size() == 2);
+  assert(writer.data()[0] == 0xff);
+  assert(writer.data()[1] == v8serial::Writer::kFormatVersion);
+
+  writer.beginObject();
+  writer.key(u"a");
+  writer.string(u"second");
+  writer.endObject();
+  const std::vector<uint8_t> second = writer.take();
+
+  const v8serial::DecodedValue decoded_first =
+      v8serial::Reader(first).read();
+  assert(decoded_first.type == v8serial::DecodedType::Int32);
+  assert(decoded_first.int32 == 1);
+
+  const v8serial::DecodedValue decoded_second =
+      v8serial::Reader(second).read();
+  assert(decoded_second.type == v8serial::DecodedType::Object);
+  assert(decoded_second.object.size() == 1);
+  assert(decoded_second.object[0].first == u"a");
+  assert(decoded_second.object[0].second.string == u"second");
+}
+
+void TestWriterResetPreservesCapacity() {
+  v8serial::Writer writer(256);
+  writer.string(u"a somewhat long string used to fill the reserved buffer");
+  const size_t used_before_reset = writer.size();
+  writer.take();
+  // reset() after take(): buffer is already empty (moved-from); a subsequent
+  // reset() should still succeed and re-emit a valid header.
+  writer.reset();
+  assert(writer.size() == 2);
+  writer.int32(7);
+  assert(writer.size() > 2);
+  (void)used_before_reset;
+}
+
+void TestWriterResetMidContainerAndBeforeRoot() {
+  v8serial::Writer writer;
+  writer.beginObject();
+  writer.key(u"x");
+  // reset() is unconditional and does not throw even with an open container
+  // or before any root value has been written.
+  writer.reset();
+  writer.int32(9);
+  const std::vector<uint8_t> encoded = writer.take();
+  const v8serial::DecodedValue decoded = v8serial::Reader(encoded).read();
+  assert(decoded.type == v8serial::DecodedType::Int32);
+  assert(decoded.int32 == 9);
+
+  v8serial::Writer fresh;
+  fresh.reset();  // reset() before any value was ever written.
+  fresh.null();
+  const std::vector<uint8_t> encoded2 = fresh.take();
+  const v8serial::DecodedValue decoded2 = v8serial::Reader(encoded2).read();
+  assert(decoded2.type == v8serial::DecodedType::Null);
+}
+
 }  // namespace
 
 int main() {
@@ -198,4 +265,7 @@ int main() {
   TestNativeViewWithOffset();
   TestExtendedScalarsAndViews();
   TestLongStringPaths();
+  TestWriterResetReuse();
+  TestWriterResetPreservesCapacity();
+  TestWriterResetMidContainerAndBeforeRoot();
 }

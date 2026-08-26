@@ -58,8 +58,30 @@ std::vector<uint8_t> take();
 ```
 
 `take()` moves the encoded buffer out. It throws if no root value was written
-or a container remains open. A `Writer` is intended for one root value and
-should not be reused after `take()`.
+or a container remains open. After `take()` the writer's internal buffer is
+empty and its state is unchanged; call `reset()` before writing another root
+value.
+
+```cpp
+void reset();
+const uint8_t* data() const;
+size_t size() const;
+```
+
+`reset()` clears the writer's state (buffer contents, open containers, root
+flag) and re-emits the version header, without releasing the buffer's
+allocated capacity. This lets a single `Writer` instance be reused for many
+messages in a row without a heap allocation per message, which is useful for
+a producer thread that encodes many messages serially. `data()`/`size()`
+provide read-only access to the bytes written so far, so a producer can copy
+the current message out (e.g. into a queue or socket write for a consumer
+thread) before calling `reset()` and encoding the next message — without
+transferring buffer ownership the way `take()` does.
+
+This reuse pattern is same-thread and serial: reset the writer, write one
+message, copy/hand off its bytes, and only then reset again. A single
+`Writer` instance is still not safe for concurrent access from multiple
+threads.
 
 ## Scalar methods
 

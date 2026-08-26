@@ -30,9 +30,31 @@ class Writer {
   explicit Writer(size_t initial_capacity = 256) {
     bytes_.reserve(initial_capacity < 2 ? 2 : initial_capacity);
     stack_.reserve(8);
-    bytes_.push_back(0xff);
-    bytes_.push_back(static_cast<uint8_t>(kFormatVersion));
+    writeHeader();
   }
+
+  /// Clears all writer state so the instance can be reused for a new root
+  /// value without releasing the underlying buffer's allocated capacity.
+  ///
+  /// Unlike `take()`, this never throws: it may be called at any time,
+  /// including mid-container or before a root value has been written. This
+  /// is intended for same-thread, serial reuse (e.g. a producer thread that
+  /// encodes many messages, copies each one out via `data()`/`size()`, then
+  /// calls `reset()` before encoding the next message) to avoid repeated
+  /// heap allocation/deallocation across messages.
+  void reset() {
+    bytes_.clear();
+    stack_.clear();
+    has_root_ = false;
+    writeHeader();
+  }
+
+  /// Pointer to the current message bytes (header plus any values written so
+  /// far). Valid until the next mutating call on this writer.
+  const uint8_t* data() const { return bytes_.data(); }
+
+  /// Number of bytes currently written, including the version header.
+  size_t size() const { return bytes_.size(); }
 
   /// Writes JavaScript `undefined`.
   void undefined() { scalar('_'); }
@@ -198,7 +220,7 @@ class Writer {
   /// Moves out the completed version-15 message.
   ///
   /// @throws std::logic_error if no root exists or a container remains open.
-  /// The writer should not be reused after this operation.
+  /// Call `reset()` before writing another root value with this instance.
   std::vector<uint8_t> take() {
     if (!stack_.empty()) {
       throw std::logic_error("cannot take bytes with an open container");
@@ -222,6 +244,11 @@ class Writer {
   std::vector<uint8_t> bytes_;
   std::vector<Frame> stack_;
   bool has_root_ = false;
+
+  void writeHeader() {
+    bytes_.push_back(0xff);
+    bytes_.push_back(static_cast<uint8_t>(kFormatVersion));
+  }
 
   void byte(uint8_t value) { bytes_.push_back(value); }
 
