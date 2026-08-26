@@ -14,11 +14,14 @@ The project contains:
   bounds-checked C++17 reader ([reader guide](docs/reader.md)).
 - `encodeSync(value)`: test and comparison binding.
 - `encodeAsync(value, callback)`: copies the JS value to native data, serializes
-  it on a worker thread, and returns an externally backed `Buffer` through a
-  `ThreadSafeFunction`.
-- `decodeSync(buffer)`: test binding for the standalone reader.
-- `decodeAsync(buffer, callback)`: copies bytes on the main thread, parses only
-  native data on a worker thread, and constructs the result on the main thread.
+  it on a worker thread, and returns a `Buffer` through a
+  `ThreadSafeFunction`. Large results transfer their native allocation without
+  another copy; small results use Node-owned storage.
+- `decodeSync(input)`: test binding for the standalone reader. `input` may be
+  an `ArrayBuffer`, any typed array (including `Buffer`), or `DataView`.
+- `decodeAsync(input, callback)`: copies the input view's byte range on the
+  main thread, parses only native data on a worker thread, and constructs the
+  result on the main thread.
 
 ```js
 const v8 = require('node:v8');
@@ -82,33 +85,33 @@ implements the core subset needed for ordinary data objects and binary blobs.
 |---|:---:|:---:|---|
 | `undefined`, `null`, Boolean | Yes | Yes | |
 | Signed int32 | Yes | Yes | ZigZag varint |
-| Unsigned uint32 | No | Yes | V8 accepts the `kUint32` tag |
+| Unsigned uint32 | Yes | Yes | Explicit C++ writer method |
 | Double, NaN, infinities, `-0` | Yes | Yes | IEEE-754 binary64 |
 | Latin-1 string | Yes | Yes | |
 | UTF-8 string | Yes | Yes | Writer expects valid UTF-8 |
 | UTF-16 string | Yes | Yes | Includes V8 alignment padding |
 | Plain object | Yes | Yes | String keys; reader also accepts integer keys |
 | Dense array | Yes | Yes | No holes or named properties |
+| Sparse array wire form | No | Yes | Every index must be present in order |
 | Ordinary `ArrayBuffer` | Yes | Yes | |
-| Native `Uint8Array` view | Yes | Yes | Writer uses offset zero and flags zero |
-| Node host-object `Uint8Array` | No | Yes | Produced by Node's `v8.serialize()` |
+| Native typed arrays and `DataView` | Yes | Yes | Writer uses offset zero and flags zero |
+| Node host-object typed arrays/DataView | No | Yes | Produced by Node's `v8.serialize()` |
 | Node host-object `Buffer` | No | Yes | Decodes as `DecodedType::Uint8Array` |
 | Shared references | No | No | Identity is not preserved |
 | Cyclic objects | No | No | Rejected rather than emitting references |
-| Sparse arrays and holes | No | No | |
+| Sparse arrays and holes | No | No | Sparse wire form is accepted only for complete arrays |
 | Named array properties | No | No | |
 | BigInt | No | No | Includes boxed BigInt |
-| Date | No | No | |
+| Date | Yes | Yes | Milliseconds since epoch, including invalid Date |
 | Boxed Boolean, Number, String | No | No | |
 | RegExp | No | No | |
 | Map and Set | No | No | |
 | Error objects | No | No | |
-| Other typed arrays and `DataView` | No | No | |
 | Resizable or transferred ArrayBuffer | No | No | |
 | `SharedArrayBuffer` | No | No | Requires delegate-managed IDs |
 | V8 shared heap objects | No | No | Version-15 shared-value tag |
 | WebAssembly module or memory | No | No | Requires a V8 delegate |
-| Custom host objects | No | Limited | Only Node Uint8Array/Buffer forms |
+| Custom host objects | No | Limited | Node binary-view forms only |
 | Legacy formats (versions 0-14) | No | No | Exact version 15 is required |
 
 Unsupported writer inputs throw before producing a buffer. Unsupported reader

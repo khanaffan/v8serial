@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "v8serial/detail/simd.hpp"
+#include "v8serial/types.hpp"
 
 namespace v8serial {
 
@@ -22,11 +23,13 @@ enum class DecodedType {
   Int32,
   Uint32,
   Double,
+  Date,
   String,
   Array,
   Object,
   ArrayBuffer,
   Uint8Array,
+  ArrayBufferView,
 };
 
 /// Native value tree produced by Reader.
@@ -49,6 +52,9 @@ struct DecodedValue {
   /// Payload for DecodedType::Double.
   double number = 0;
 
+  /// Milliseconds since the epoch for DecodedType::Date.
+  double date_milliseconds = 0;
+
   /// Payload for DecodedType::String.
   std::u16string string;
 
@@ -58,7 +64,10 @@ struct DecodedValue {
   /// Ordered key/value pairs for DecodedType::Object.
   std::vector<std::pair<std::u16string, DecodedValue>> object;
 
-  /// Bytes for DecodedType::ArrayBuffer or DecodedType::Uint8Array.
+  /// Concrete view type for DecodedType::ArrayBufferView.
+  ArrayBufferViewType view_type = ArrayBufferViewType::Uint8Array;
+
+  /// Bytes for ArrayBuffer and array-view decoded types.
   std::vector<uint8_t> binary;
 };
 
@@ -276,6 +285,77 @@ class Reader {
     return value;
   }
 
+  ArrayBufferViewType readArrayBufferViewType(uint32_t tag) {
+    switch (tag) {
+      case 'b':
+        return ArrayBufferViewType::Int8Array;
+      case 'B':
+        return ArrayBufferViewType::Uint8Array;
+      case 'C':
+        return ArrayBufferViewType::Uint8ClampedArray;
+      case 'w':
+        return ArrayBufferViewType::Int16Array;
+      case 'W':
+        return ArrayBufferViewType::Uint16Array;
+      case 'd':
+        return ArrayBufferViewType::Int32Array;
+      case 'D':
+        return ArrayBufferViewType::Uint32Array;
+      case 'f':
+        return ArrayBufferViewType::Float32Array;
+      case 'F':
+        return ArrayBufferViewType::Float64Array;
+      case 'q':
+        return ArrayBufferViewType::BigInt64Array;
+      case 'Q':
+        return ArrayBufferViewType::BigUint64Array;
+      case '?':
+        return ArrayBufferViewType::DataView;
+      default:
+        fail("unsupported ArrayBuffer view type");
+    }
+  }
+
+  ArrayBufferViewType readHostObjectViewType(uint32_t node_type) {
+    switch (node_type) {
+      case 0:
+        return ArrayBufferViewType::Int8Array;
+      case 1:
+      case 10:
+        return ArrayBufferViewType::Uint8Array;
+      case 2:
+        return ArrayBufferViewType::Uint8ClampedArray;
+      case 3:
+        return ArrayBufferViewType::Int16Array;
+      case 4:
+        return ArrayBufferViewType::Uint16Array;
+      case 5:
+        return ArrayBufferViewType::Int32Array;
+      case 6:
+        return ArrayBufferViewType::Uint32Array;
+      case 7:
+        return ArrayBufferViewType::Float32Array;
+      case 8:
+        return ArrayBufferViewType::Float64Array;
+      case 9:
+        return ArrayBufferViewType::DataView;
+      case 11:
+        return ArrayBufferViewType::BigInt64Array;
+      case 12:
+        return ArrayBufferViewType::BigUint64Array;
+      default:
+        fail("unsupported Node ArrayBuffer view host object");
+    }
+  }
+
+  static void setArrayBufferViewType(DecodedValue& output,
+                                     ArrayBufferViewType type) {
+    output.type = type == ArrayBufferViewType::Uint8Array
+                      ? DecodedType::Uint8Array
+                      : DecodedType::ArrayBufferView;
+    output.view_type = type;
+  }
+
   std::u16string readPropertyKey(size_t depth) {
     DecodedValue key = readValue(depth);
     if (key.type == DecodedType::String) return std::move(key.string);
@@ -325,6 +405,47 @@ class Reader {
     return output;
   }
 
+  DecodedValue readSparseArray(size_t depth) {
+    const uint32_t length = readVarint();
+    if (length > remaining()) fail("array length exceeds remaining input");
+
+    DecodedValue output;
+    output.type = DecodedType::Array;
+    output.array.reserve(length);
+    uint32_t properties = 0;
+
+    while (peekTag() != '@') {
+      DecodedValue key = readValue(depth + 1);
+      uint32_t index;
+      if (key.type == DecodedType::Uint32) {
+        index = key.uint32;
+      } else if (key.type == DecodedType::Int32 && key.int32 >= 0) {
+        index = static_cast<uint32_t>(key.int32);
+      } else {
+        fail("sparse array property key is not a non-negative integer");
+      }
+      if (index != properties) {
+        fail("array holes or named properties are not supported");
+      }
+
+      output.array.push_back(readValue(depth + 1));
+      if (properties == std::numeric_limits<uint32_t>::max()) {
+        fail("sparse array property count overflow");
+      }
+      ++properties;
+    }
+
+    readTag();
+    if (readVarint() != properties) {
+      fail("sparse array property count mismatch");
+    }
+    if (readVarint() != length) fail("array length mismatch");
+    if (properties != length) {
+      fail("array holes or named properties are not supported");
+    }
+    return output;
+  }
+
   DecodedValue readArrayBuffer() {
     DecodedValue output;
     output.type = DecodedType::ArrayBuffer;
@@ -333,22 +454,26 @@ class Reader {
     skipPadding();
     if (current_ != end_ && *current_ == 'V') {
       readTag();
-      const uint32_t view_type = readVarint();
+      const ArrayBufferViewType view_type =
+          readArrayBufferViewType(readVarint());
       const uint32_t byte_offset = readVarint();
       const uint32_t byte_length = readVarint();
       const uint32_t flags = readVarint();
-      if (view_type != static_cast<uint8_t>('B')) {
-        fail("only native Uint8Array views are supported");
-      }
       if (flags != 0) fail("resizable or length-tracking views are unsupported");
       if (byte_offset > output.binary.size() ||
           byte_length > output.binary.size() - byte_offset) {
-        fail("Uint8Array view exceeds its backing buffer");
+        fail("ArrayBuffer view exceeds its backing buffer");
+      }
+      const size_t element_size =
+          detail::arrayBufferViewElementSize(view_type);
+      if (byte_offset % element_size != 0 ||
+          byte_length % element_size != 0) {
+        fail("ArrayBuffer view is not aligned to its element size");
       }
       std::vector<uint8_t> view(output.binary.begin() + byte_offset,
                                 output.binary.begin() + byte_offset +
                                     byte_length);
-      output.type = DecodedType::Uint8Array;
+      setArrayBufferViewType(output, view_type);
       output.binary = std::move(view);
     }
     return output;
@@ -357,12 +482,15 @@ class Reader {
   DecodedValue readHostObject() {
     const uint32_t node_type = readVarint();
     const uint32_t byte_length = readVarint();
-    if (node_type != 1 && node_type != 10) {
-      fail("only Node Uint8Array and Buffer host objects are supported");
+    const ArrayBufferViewType view_type =
+        readHostObjectViewType(node_type);
+    const size_t element_size = detail::arrayBufferViewElementSize(view_type);
+    if (byte_length % element_size != 0) {
+      fail("Node ArrayBuffer view byte length is not a multiple of its element size");
     }
 
     DecodedValue output;
-    output.type = DecodedType::Uint8Array;
+    setArrayBufferViewType(output, view_type);
     output.binary = readBytes(byte_length);
     return output;
   }
@@ -371,7 +499,11 @@ class Reader {
     if (depth > kMaxNestingDepth) fail("maximum nesting depth exceeded");
 
     DecodedValue output;
-    const uint8_t tag = readTag();
+    uint8_t tag = readTag();
+    while (tag == '?') {
+      readVarint();
+      tag = readTag();
+    }
     switch (tag) {
       case '_':
         return output;
@@ -398,6 +530,10 @@ class Reader {
         output.type = DecodedType::Double;
         output.number = readDouble();
         return output;
+      case 'D':
+        output.type = DecodedType::Date;
+        output.date_milliseconds = readDouble();
+        return output;
       case 'S':
         output.type = DecodedType::String;
         output.string = readUtf8String();
@@ -414,6 +550,8 @@ class Reader {
         return readObject(depth);
       case 'A':
         return readDenseArray(depth);
+      case 'a':
+        return readSparseArray(depth);
       case 'B':
         return readArrayBuffer();
       case '\\':

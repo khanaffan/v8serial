@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "v8serial/detail/simd.hpp"
+#include "v8serial/types.hpp"
 
 namespace v8serial {
 
@@ -50,19 +51,28 @@ class Writer {
            static_cast<uint32_t>(value >> 31));
   }
 
+  /// Writes an unsigned 32-bit integer using V8's unsigned varint tag.
+  void uint32(uint32_t value) {
+    beginValue();
+    byte('U');
+    varint(value);
+  }
+
   /// Writes an IEEE-754 double in the version-15 native representation.
   ///
   /// Use this method for non-integral numbers, NaN, infinities, and negative
-  /// zero. The implementation emits little-endian bytes.
+  /// zero. V8's version-15 representation uses host byte order.
   void number(double value) {
     beginValue();
     byte('N');
-    uint64_t bits;
-    static_assert(sizeof(bits) == sizeof(value));
-    std::memcpy(&bits, &value, sizeof(bits));
-    for (unsigned shift = 0; shift < 64; shift += 8) {
-      byte(static_cast<uint8_t>(bits >> shift));
-    }
+    rawDouble(value);
+  }
+
+  /// Writes a JavaScript Date from its milliseconds-since-epoch value.
+  void date(double milliseconds) {
+    beginValue();
+    byte('D');
+    rawDouble(milliseconds);
   }
 
   /// Writes a UTF-8 string.
@@ -158,10 +168,28 @@ class Writer {
   /// @throws std::invalid_argument if data is null and size is nonzero.
   /// @throws std::length_error if size exceeds UINT32_MAX.
   void uint8Array(const uint8_t* data, size_t size) {
+    arrayBufferView(ArrayBufferViewType::Uint8Array, data, size);
+  }
+
+  /// Writes an ArrayBuffer view with a new backing buffer and offset zero.
+  ///
+  /// @throws std::invalid_argument if @p size is not a multiple of the view's
+  /// element size, or if data is null and size is nonzero.
+  /// @throws std::length_error if size exceeds UINT32_MAX.
+  void arrayBufferView(ArrayBufferViewType type, const uint8_t* data,
+                       size_t size) {
+    const size_t element_size = detail::arrayBufferViewElementSize(type);
+    if (element_size == 0) {
+      throw std::invalid_argument("unknown ArrayBuffer view type");
+    }
+    if (size % element_size != 0) {
+      throw std::invalid_argument(
+          "view byte length is not a multiple of its element size");
+    }
     beginValue();
     rawArrayBuffer(data, size);
     byte('V');
-    byte('B');  // V8's ArrayBufferViewTag::kUint8Array.
+    byte(arrayBufferViewTag(type));
     varint(0);  // byteOffset
     checkedVarint(size);
     varint(0);  // version >= 14 view flags
@@ -196,6 +224,42 @@ class Writer {
   bool has_root_ = false;
 
   void byte(uint8_t value) { bytes_.push_back(value); }
+
+  void rawDouble(double value) {
+    uint8_t bytes[sizeof(value)];
+    std::memcpy(bytes, &value, sizeof(value));
+    bytes_.insert(bytes_.end(), bytes, bytes + sizeof(value));
+  }
+
+  static uint8_t arrayBufferViewTag(ArrayBufferViewType type) {
+    switch (type) {
+      case ArrayBufferViewType::Int8Array:
+        return 'b';
+      case ArrayBufferViewType::Uint8Array:
+        return 'B';
+      case ArrayBufferViewType::Uint8ClampedArray:
+        return 'C';
+      case ArrayBufferViewType::Int16Array:
+        return 'w';
+      case ArrayBufferViewType::Uint16Array:
+        return 'W';
+      case ArrayBufferViewType::Int32Array:
+        return 'd';
+      case ArrayBufferViewType::Uint32Array:
+        return 'D';
+      case ArrayBufferViewType::Float32Array:
+        return 'f';
+      case ArrayBufferViewType::Float64Array:
+        return 'F';
+      case ArrayBufferViewType::BigInt64Array:
+        return 'q';
+      case ArrayBufferViewType::BigUint64Array:
+        return 'Q';
+      case ArrayBufferViewType::DataView:
+        return '?';
+    }
+    throw std::invalid_argument("unknown ArrayBuffer view type");
+  }
 
   void varint(uint32_t value) {
     do {
@@ -272,10 +336,9 @@ class Writer {
     if (((bytes_.size() + 1U + varintSize(byte_length)) & 1U) != 0) byte(0);
     byte('c');
     varint(byte_length);
-    for (char16_t code_unit : value) {
-      byte(static_cast<uint8_t>(code_unit));
-      byte(static_cast<uint8_t>(code_unit >> 8));
-    }
+    static_assert(sizeof(char16_t) == 2);
+    const auto* data = reinterpret_cast<const uint8_t*>(value.data());
+    bytes_.insert(bytes_.end(), data, data + byte_length);
   }
 
   void rawArrayBuffer(const uint8_t* data, size_t size) {

@@ -55,9 +55,11 @@ struct DecodedValue {
   int32_t int32;
   uint32_t uint32;
   double number;
+  double date_milliseconds;
   std::u16string string;
   std::vector<DecodedValue> array;
   std::vector<std::pair<std::u16string, DecodedValue>> object;
+  ArrayBufferViewType view_type;
   std::vector<uint8_t> binary;
 };
 ```
@@ -71,10 +73,12 @@ Read the member selected by `type`:
 | `Int32` | `int32` |
 | `Uint32` | `uint32` |
 | `Double` | `number` |
+| `Date` | `date_milliseconds` |
 | `String` | `string` |
 | `Array` | `array` |
 | `Object` | `object` |
 | `ArrayBuffer`, `Uint8Array` | `binary` |
+| `ArrayBufferView` | `view_type`, `binary` |
 
 Object properties preserve their serialized order. Integer property keys are
 converted to their decimal UTF-16 string representation.
@@ -86,15 +90,18 @@ The reader supports:
 - undefined, null and booleans;
 - signed and unsigned 32-bit numbers;
 - doubles;
+- Dates;
 - UTF-8, Latin-1 and UTF-16 strings;
-- dense arrays without holes or named properties;
+- arrays without holes or named properties, in dense or sparse wire form;
 - plain objects with string or integer keys;
 - ordinary ArrayBuffers;
-- native Uint8Array views, including valid offsets into a backing buffer;
-- Node 22 host-object forms for Uint8Array and Buffer.
+- native Node 22 typed-array and DataView forms, including valid offsets;
+- Node 22 host-object forms for typed arrays, DataView and Buffer.
 
 Node Buffer host objects decode as `DecodedType::Uint8Array`. The standalone
-model intentionally does not carry Node-specific Buffer identity.
+model intentionally does not carry Node-specific Buffer identity. Other binary
+views use `DecodedType::ArrayBufferView` and identify their concrete type in
+`view_type`.
 
 ## Validation
 
@@ -107,7 +114,7 @@ The reader validates before accessing or allocating payloads:
 - even UTF-16 byte lengths;
 - object property counts;
 - dense-array element and terminal lengths;
-- Uint8Array offsets, lengths and flags;
+- binary-view types, element alignment, offsets, lengths and flags;
 - complete root-value consumption;
 - nesting depth, limited to 512.
 
@@ -127,10 +134,10 @@ Passing a null pointer with a nonzero size throws `std::invalid_argument`.
 
 ## Unsupported values
 
-The reader explicitly rejects object references and cycles, sparse arrays,
-holes, named array properties, other typed-array views, resizable/shared/
-transferred buffers, BigInt, Date, boxed primitives, RegExp, Map, Set, Error,
-WebAssembly values and shared heap objects.
+The reader explicitly rejects object references and cycles, array holes,
+named array properties, resizable/shared/transferred buffers, BigInt, boxed
+primitives, RegExp, Map, Set, Error, WebAssembly values and shared heap
+objects. Float16Array is not available in the supported Node 22 runtime.
 
 It fails on unsupported tags rather than returning a partially interpreted
 value.

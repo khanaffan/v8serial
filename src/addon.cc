@@ -17,6 +17,7 @@
 namespace {
 
 constexpr size_t kMaxNestingDepth = 512;
+constexpr size_t kMinExternalBufferSize = 4 * 1024;
 
 enum class Type {
   Undefined,
@@ -24,11 +25,13 @@ enum class Type {
   Boolean,
   Int32,
   Double,
+  Date,
   String,
   Array,
   Object,
   ArrayBuffer,
   Uint8Array,
+  ArrayBufferView,
 };
 
 struct Value {
@@ -36,11 +39,144 @@ struct Value {
   bool boolean = false;
   int32_t int32 = 0;
   double number = 0;
+  v8serial::ArrayBufferViewType view_type =
+      v8serial::ArrayBufferViewType::Uint8Array;
   std::u16string string;
   std::vector<Value> array;
   std::vector<std::pair<std::u16string, Value>> object;
   std::vector<uint8_t> binary;
 };
+
+struct ArrayBufferViewData {
+  v8serial::ArrayBufferViewType type;
+  const uint8_t* data;
+  size_t size;
+};
+
+Napi::Function ResolveResizableGetter(Napi::Env env) {
+  Napi::Function array_buffer =
+      env.Global().Get("ArrayBuffer").As<Napi::Function>();
+  Napi::Object prototype =
+      array_buffer.Get("prototype").As<Napi::Object>();
+  Napi::Function object = env.Global().Get("Object").As<Napi::Function>();
+  Napi::Function get_descriptor =
+      object.Get("getOwnPropertyDescriptor").As<Napi::Function>();
+  Napi::Object descriptor =
+      get_descriptor
+          .Call(object,
+                {prototype, Napi::String::New(env, "resizable")})
+          .As<Napi::Object>();
+  return descriptor.Get("get").As<Napi::Function>();
+}
+
+struct AddonData {
+  explicit AddonData(Napi::Env env)
+      : resizable_getter(Napi::Persistent(ResolveResizableGetter(env))),
+        plain_object_prototype(Napi::Persistent(
+            env.Global()
+                .Get("Object")
+                .As<Napi::Object>()
+                .Get("prototype")
+                .As<Napi::Object>())) {}
+
+  Napi::FunctionReference resizable_getter;
+  Napi::ObjectReference plain_object_prototype;
+};
+
+AddonData& GetAddonData(Napi::Env env) {
+  AddonData* data = env.GetInstanceData<AddonData>();
+  if (data == nullptr) {
+    throw Napi::Error::New(env, "v8serial addon data is unavailable");
+  }
+  return *data;
+}
+
+bool IsResizableArrayBuffer(Napi::Env env, Napi::ArrayBuffer buffer) {
+  Napi::Value result =
+      GetAddonData(env).resizable_getter.Call(buffer, {});
+  if (!result.IsBoolean()) {
+    throw Napi::Error::New(
+        env, "ArrayBuffer resizable getter returned a non-Boolean value");
+  }
+  return result.As<Napi::Boolean>().Value();
+}
+
+Napi::ArrayBuffer RequireArrayBuffer(Napi::Env env, Napi::Value value) {
+  if (!value.IsArrayBuffer()) {
+    throw Napi::TypeError::New(
+        env, "SharedArrayBuffer-backed views are not supported");
+  }
+  Napi::ArrayBuffer buffer = value.As<Napi::ArrayBuffer>();
+  if (buffer.IsDetached()) {
+    throw Napi::TypeError::New(env, "detached ArrayBuffers are not supported");
+  }
+  if (IsResizableArrayBuffer(env, buffer)) {
+    throw Napi::TypeError::New(env, "resizable ArrayBuffers are not supported");
+  }
+  return buffer;
+}
+
+v8serial::ArrayBufferViewType ToArrayBufferViewType(
+    Napi::Env env, napi_typedarray_type type) {
+  switch (type) {
+    case napi_int8_array:
+      return v8serial::ArrayBufferViewType::Int8Array;
+    case napi_uint8_array:
+      return v8serial::ArrayBufferViewType::Uint8Array;
+    case napi_uint8_clamped_array:
+      return v8serial::ArrayBufferViewType::Uint8ClampedArray;
+    case napi_int16_array:
+      return v8serial::ArrayBufferViewType::Int16Array;
+    case napi_uint16_array:
+      return v8serial::ArrayBufferViewType::Uint16Array;
+    case napi_int32_array:
+      return v8serial::ArrayBufferViewType::Int32Array;
+    case napi_uint32_array:
+      return v8serial::ArrayBufferViewType::Uint32Array;
+    case napi_float32_array:
+      return v8serial::ArrayBufferViewType::Float32Array;
+    case napi_float64_array:
+      return v8serial::ArrayBufferViewType::Float64Array;
+    case napi_bigint64_array:
+      return v8serial::ArrayBufferViewType::BigInt64Array;
+    case napi_biguint64_array:
+      return v8serial::ArrayBufferViewType::BigUint64Array;
+    default:
+      throw Napi::TypeError::New(env, "unsupported typed-array type");
+  }
+}
+
+ArrayBufferViewData GetArrayBufferViewData(Napi::Env env, Napi::Value input) {
+  if (input.IsDataView()) {
+    Napi::DataView view = input.As<Napi::DataView>();
+    RequireArrayBuffer(env, view.Buffer());
+    return {v8serial::ArrayBufferViewType::DataView,
+            static_cast<const uint8_t*>(view.Data()), view.ByteLength()};
+  }
+
+  Napi::TypedArray view = input.As<Napi::TypedArray>();
+  RequireArrayBuffer(env, view.Buffer());
+
+  napi_typedarray_type type;
+  void* data;
+  const napi_status status = napi_get_typedarray_info(
+      env, input, &type, nullptr, &data, nullptr, nullptr);
+  if (status != napi_ok) {
+    throw Napi::Error::New(env, "failed to inspect typed-array bytes");
+  }
+  return {ToArrayBufferViewType(env, type),
+          static_cast<const uint8_t*>(data), view.ByteLength()};
+}
+
+void CopyArrayBufferView(Value& output, const ArrayBufferViewData& view) {
+  output.view_type = view.type;
+  output.type = view.type == v8serial::ArrayBufferViewType::Uint8Array
+                    ? Type::Uint8Array
+                    : Type::ArrayBufferView;
+  if (view.size != 0) {
+    output.binary.assign(view.data, view.data + view.size);
+  }
+}
 
 bool IsAncestor(Napi::Env env, Napi::Value candidate,
                 const std::vector<Napi::Object>& ancestors) {
@@ -72,10 +208,7 @@ Napi::Array OwnEnumerableNames(Napi::Env env, Napi::Object object) {
 }
 
 Napi::Value PlainObjectPrototype(Napi::Env env) {
-  return env.Global()
-      .Get("Object")
-      .As<Napi::Object>()
-      .Get("prototype");
+  return GetAddonData(env).plain_object_prototype.Value();
 }
 
 bool HasPlainPrototype(Napi::Env env, Napi::Object object,
@@ -92,6 +225,14 @@ bool HasPlainPrototype(Napi::Env env, Napi::Object object,
     throw Napi::Error::New(env, "failed to compare object prototype");
   }
   return equal;
+}
+
+bool HasOwnProperty(Napi::Env env, Napi::Object object, Napi::Value key) {
+  bool result = false;
+  if (napi_has_own_property(env, object, key, &result) != napi_ok) {
+    throw Napi::Error::New(env, "failed to inspect object property");
+  }
+  return result;
 }
 
 Value CopyValue(Napi::Env env, Napi::Value input,
@@ -131,11 +272,16 @@ Value CopyValue(Napi::Env env, Napi::Value input,
     output.string = ToUtf16(input.As<Napi::String>());
     return output;
   }
+  if (input.IsDate()) {
+    output.type = Type::Date;
+    output.number = input.As<Napi::Date>().ValueOf();
+    return output;
+  }
 
   if (!input.IsObject()) {
     throw Napi::TypeError::New(
         env, "unsupported value; expected core scalar, array, plain object, "
-             "ArrayBuffer, or Uint8Array");
+             "Date, ArrayBuffer, typed array, or DataView");
   }
   if (IsAncestor(env, input, ancestors)) {
     throw Napi::TypeError::New(env, "cyclic values are not supported");
@@ -146,18 +292,14 @@ Value CopyValue(Napi::Env env, Napi::Value input,
 
   if (input.IsArrayBuffer()) {
     Napi::ArrayBuffer buffer = input.As<Napi::ArrayBuffer>();
+    RequireArrayBuffer(env, buffer);
     const auto* data = static_cast<const uint8_t*>(buffer.Data());
     output.type = Type::ArrayBuffer;
-    output.binary.assign(data, data + buffer.ByteLength());
-  } else if (input.IsTypedArray()) {
-    Napi::TypedArray typed = input.As<Napi::TypedArray>();
-    if (typed.TypedArrayType() != napi_uint8_array) {
-      ancestors.pop_back();
-      throw Napi::TypeError::New(env, "only Uint8Array is supported");
+    if (buffer.ByteLength() != 0) {
+      output.binary.assign(data, data + buffer.ByteLength());
     }
-    Napi::Uint8Array bytes = input.As<Napi::Uint8Array>();
-    output.type = Type::Uint8Array;
-    output.binary.assign(bytes.Data(), bytes.Data() + bytes.ElementLength());
+  } else if (input.IsTypedArray() || input.IsDataView()) {
+    CopyArrayBufferView(output, GetArrayBufferViewData(env, input));
   } else if (input.IsArray()) {
     Napi::Array array = input.As<Napi::Array>();
     output.type = Type::Array;
@@ -191,6 +333,7 @@ Value CopyValue(Napi::Env env, Napi::Value input,
         throw Napi::TypeError::New(env, "symbol properties are not supported");
       }
       Napi::String key = key_value.As<Napi::String>();
+      if (!HasOwnProperty(env, object, key)) continue;
       output.object.emplace_back(ToUtf16(key),
                                  CopyValue(env, object.Get(key), ancestors,
                                            plain_prototype, depth + 1));
@@ -222,6 +365,9 @@ void WriteValue(v8serial::Writer& writer, const Value& value, size_t depth) {
     case Type::Double:
       writer.number(value.number);
       break;
+    case Type::Date:
+      writer.date(value.number);
+      break;
     case Type::String:
       writer.string(value.string);
       break;
@@ -245,6 +391,10 @@ void WriteValue(v8serial::Writer& writer, const Value& value, size_t depth) {
       break;
     case Type::Uint8Array:
       writer.uint8Array(value.binary.data(), value.binary.size());
+      break;
+    case Type::ArrayBufferView:
+      writer.arrayBufferView(value.view_type, value.binary.data(),
+                             value.binary.size());
       break;
   }
 }
@@ -292,10 +442,14 @@ void WriteJavaScriptValue(Napi::Env env, Napi::Value input,
     writer.string(ToUtf16(input.As<Napi::String>()));
     return;
   }
+  if (input.IsDate()) {
+    writer.date(input.As<Napi::Date>().ValueOf());
+    return;
+  }
   if (!input.IsObject()) {
     throw Napi::TypeError::New(
         env, "unsupported value; expected core scalar, array, plain object, "
-             "ArrayBuffer, or Uint8Array");
+             "Date, ArrayBuffer, typed array, or DataView");
   }
   if (IsAncestor(env, input, ancestors)) {
     throw Napi::TypeError::New(env, "cyclic values are not supported");
@@ -306,15 +460,12 @@ void WriteJavaScriptValue(Napi::Env env, Napi::Value input,
 
   if (input.IsArrayBuffer()) {
     Napi::ArrayBuffer buffer = input.As<Napi::ArrayBuffer>();
+    RequireArrayBuffer(env, buffer);
     writer.arrayBuffer(static_cast<const uint8_t*>(buffer.Data()),
                        buffer.ByteLength());
-  } else if (input.IsTypedArray()) {
-    Napi::TypedArray typed = input.As<Napi::TypedArray>();
-    if (typed.TypedArrayType() != napi_uint8_array) {
-      throw Napi::TypeError::New(env, "only Uint8Array is supported");
-    }
-    Napi::Uint8Array bytes = input.As<Napi::Uint8Array>();
-    writer.uint8Array(bytes.Data(), bytes.ElementLength());
+  } else if (input.IsTypedArray() || input.IsDataView()) {
+    const ArrayBufferViewData view = GetArrayBufferViewData(env, input);
+    writer.arrayBufferView(view.type, view.data, view.size);
   } else if (input.IsArray()) {
     Napi::Array array = input.As<Napi::Array>();
     writer.beginArray(array.Length());
@@ -342,6 +493,7 @@ void WriteJavaScriptValue(Napi::Env env, Napi::Value input,
         throw Napi::TypeError::New(env, "symbol properties are not supported");
       }
       Napi::String key = key_value.As<Napi::String>();
+      if (!HasOwnProperty(env, object, key)) continue;
       writer.key(ToUtf16(key));
       WriteJavaScriptValue(env, object.Get(key), writer, ancestors,
                            plain_prototype, depth + 1);
@@ -372,7 +524,14 @@ void FinalizeExternalBuffer(napi_env, void*, void* hint) {
   delete static_cast<std::vector<uint8_t>*>(hint);
 }
 
-Napi::Value AdoptBuffer(Napi::Env env, std::vector<uint8_t>&& encoded) {
+Napi::Value CreateOutputBuffer(Napi::Env env,
+                               std::vector<uint8_t>&& encoded) {
+  // Node 22 treats buffers below 4 KiB as small allocations. Keeping those
+  // Node-owned avoids allocator retention from many tiny external buffers.
+  if (encoded.size() < kMinExternalBufferSize) {
+    return Napi::Buffer<uint8_t>::Copy(env, encoded.data(), encoded.size());
+  }
+
   auto* owner = new std::vector<uint8_t>(std::move(encoded));
   napi_value result;
   napi_status status =
@@ -390,8 +549,66 @@ Napi::Value EncodeSync(const Napi::CallbackInfo& info) {
   if (info.Length() != 1) {
     throw Napi::TypeError::New(info.Env(), "encodeSync expects one value");
   }
-  return AdoptBuffer(info.Env(),
-                     EncodeJavaScriptValue(info.Env(), info[0]));
+  return CreateOutputBuffer(info.Env(),
+                            EncodeJavaScriptValue(info.Env(), info[0]));
+}
+
+napi_typedarray_type ToNapiTypedArrayType(
+    v8serial::ArrayBufferViewType type) {
+  switch (type) {
+    case v8serial::ArrayBufferViewType::Int8Array:
+      return napi_int8_array;
+    case v8serial::ArrayBufferViewType::Uint8Array:
+      return napi_uint8_array;
+    case v8serial::ArrayBufferViewType::Uint8ClampedArray:
+      return napi_uint8_clamped_array;
+    case v8serial::ArrayBufferViewType::Int16Array:
+      return napi_int16_array;
+    case v8serial::ArrayBufferViewType::Uint16Array:
+      return napi_uint16_array;
+    case v8serial::ArrayBufferViewType::Int32Array:
+      return napi_int32_array;
+    case v8serial::ArrayBufferViewType::Uint32Array:
+      return napi_uint32_array;
+    case v8serial::ArrayBufferViewType::Float32Array:
+      return napi_float32_array;
+    case v8serial::ArrayBufferViewType::Float64Array:
+      return napi_float64_array;
+    case v8serial::ArrayBufferViewType::BigInt64Array:
+      return napi_bigint64_array;
+    case v8serial::ArrayBufferViewType::BigUint64Array:
+      return napi_biguint64_array;
+    case v8serial::ArrayBufferViewType::DataView:
+      break;
+  }
+  throw std::invalid_argument("DataView is not a typed array");
+}
+
+Napi::Value ToJavaScriptArrayBufferView(
+    Napi::Env env, v8serial::ArrayBufferViewType type,
+    const std::vector<uint8_t>& bytes) {
+  Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, bytes.size());
+  if (!bytes.empty()) {
+    std::memcpy(buffer.Data(), bytes.data(), bytes.size());
+  }
+  if (type == v8serial::ArrayBufferViewType::DataView) {
+    return Napi::DataView::New(env, buffer, 0, bytes.size());
+  }
+
+  const size_t element_size =
+      v8serial::detail::arrayBufferViewElementSize(type);
+  if (bytes.size() % element_size != 0) {
+    throw Napi::Error::New(
+        env, "decoded view byte length is not a multiple of its element size");
+  }
+  napi_value result;
+  const napi_status status =
+      napi_create_typedarray(env, ToNapiTypedArrayType(type),
+                             bytes.size() / element_size, buffer, 0, &result);
+  if (status != napi_ok) {
+    throw Napi::Error::New(env, "failed to create decoded typed array");
+  }
+  return Napi::Value(env, result);
 }
 
 Napi::Value ToJavaScript(Napi::Env env, const v8serial::DecodedValue& value,
@@ -413,6 +630,8 @@ Napi::Value ToJavaScript(Napi::Env env, const v8serial::DecodedValue& value,
       return Napi::Number::New(env, value.uint32);
     case v8serial::DecodedType::Double:
       return Napi::Number::New(env, value.number);
+    case v8serial::DecodedType::Date:
+      return Napi::Date::New(env, value.date_milliseconds);
     case v8serial::DecodedType::String:
       return Napi::String::New(env, value.string.data(), value.string.size());
     case v8serial::DecodedType::Array: {
@@ -453,13 +672,11 @@ Napi::Value ToJavaScript(Napi::Env env, const v8serial::DecodedValue& value,
       return output;
     }
     case v8serial::DecodedType::Uint8Array: {
-      Napi::ArrayBuffer buffer =
-          Napi::ArrayBuffer::New(env, value.binary.size());
-      if (!value.binary.empty()) {
-        std::memcpy(buffer.Data(), value.binary.data(), value.binary.size());
-      }
-      return Napi::Uint8Array::New(env, value.binary.size(), buffer, 0);
+      return ToJavaScriptArrayBufferView(
+          env, v8serial::ArrayBufferViewType::Uint8Array, value.binary);
     }
+    case v8serial::DecodedType::ArrayBufferView:
+      return ToJavaScriptArrayBufferView(env, value.view_type, value.binary);
   }
   throw Napi::Error::New(env, "unknown decoded value type");
 }
@@ -470,24 +687,56 @@ std::vector<uint8_t> CopySerializedInput(const Napi::CallbackInfo& info,
   if (index >= info.Length()) {
     throw Napi::TypeError::New(env, "serialized input is required");
   }
+
+  auto copy_bytes = [env](const void* data, size_t size) {
+    if (size == 0) return std::vector<uint8_t>{};
+    if (data == nullptr) {
+      throw Napi::Error::New(env, "serialized input bytes are unavailable");
+    }
+    const auto* begin = static_cast<const uint8_t*>(data);
+    return std::vector<uint8_t>(begin, begin + size);
+  };
+
   if (info[index].IsArrayBuffer()) {
     Napi::ArrayBuffer buffer = info[index].As<Napi::ArrayBuffer>();
-    const auto* data = static_cast<const uint8_t*>(buffer.Data());
-    if (buffer.ByteLength() == 0) return {};
-    return std::vector<uint8_t>(data, data + buffer.ByteLength());
+    if (buffer.IsDetached()) {
+      throw Napi::TypeError::New(
+          env, "detached ArrayBuffers cannot contain serialized input");
+    }
+    return copy_bytes(buffer.Data(), buffer.ByteLength());
   }
+
+  if (info[index].IsDataView()) {
+    Napi::DataView view = info[index].As<Napi::DataView>();
+    Napi::Value backing_buffer = view.Buffer();
+    if (backing_buffer.IsArrayBuffer() &&
+        backing_buffer.As<Napi::ArrayBuffer>().IsDetached()) {
+      throw Napi::TypeError::New(
+          env, "detached ArrayBuffers cannot contain serialized input");
+    }
+    return copy_bytes(view.Data(), view.ByteLength());
+  }
+
   if (info[index].IsTypedArray()) {
     Napi::TypedArray typed = info[index].As<Napi::TypedArray>();
-    if (typed.TypedArrayType() != napi_uint8_array) {
-      throw Napi::TypeError::New(env, "serialized input must contain bytes");
+    Napi::Value backing_buffer = typed.Buffer();
+    if (backing_buffer.IsArrayBuffer() &&
+        backing_buffer.As<Napi::ArrayBuffer>().IsDetached()) {
+      throw Napi::TypeError::New(
+          env, "detached ArrayBuffers cannot contain serialized input");
     }
-    Napi::Uint8Array bytes = info[index].As<Napi::Uint8Array>();
-    if (bytes.ElementLength() == 0) return {};
-    return std::vector<uint8_t>(bytes.Data(),
-                                bytes.Data() + bytes.ElementLength());
+
+    void* data = nullptr;
+    const napi_status status = napi_get_typedarray_info(
+        env, info[index], nullptr, nullptr, &data, nullptr, nullptr);
+    if (status != napi_ok) {
+      throw Napi::Error::New(env, "failed to inspect serialized input");
+    }
+    return copy_bytes(data, typed.ByteLength());
   }
+
   throw Napi::TypeError::New(
-      env, "serialized input must be a Buffer, Uint8Array, or ArrayBuffer");
+      env, "serialized input must be an ArrayBuffer, typed array, or DataView");
 }
 
 v8serial::DecodedValue Decode(const std::vector<uint8_t>& bytes) {
@@ -556,7 +805,8 @@ Napi::Value EncodeAsync(const Napi::CallbackInfo& info) {
                   return;
                 }
                 callback.Call(
-                    {env.Null(), AdoptBuffer(env, std::move(result->bytes))});
+                    {env.Null(),
+                     CreateOutputBuffer(env, std::move(result->bytes))});
               });
           if (status != napi_ok) delete result;
           owned_work->tsfn.Release();
@@ -621,6 +871,7 @@ Napi::Value DecodeAsync(const Napi::CallbackInfo& info) {
 }
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
+  env.SetInstanceData(new AddonData(env));
   exports.Set("encodeSync", Napi::Function::New(env, EncodeSync));
   exports.Set("encodeAsync", Napi::Function::New(env, EncodeAsync));
   exports.Set("decodeSync", Napi::Function::New(env, DecodeSync));

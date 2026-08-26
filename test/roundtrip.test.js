@@ -39,6 +39,18 @@ test('round-trips supported scalar values', () => {
   }
 });
 
+test('round-trips Date values', () => {
+  for (const value of [new Date(1234.5), new Date(Number.NaN)]) {
+    const fromWriter = v8.deserialize(encodeSync(value));
+    assert.ok(fromWriter instanceof Date);
+    assert.ok(Object.is(fromWriter.valueOf(), value.valueOf()));
+
+    const fromReader = decodeSync(v8.serialize(value));
+    assert.ok(fromReader instanceof Date);
+    assert.ok(Object.is(fromReader.valueOf(), value.valueOf()));
+  }
+});
+
 test('matches deterministic V8 bytes for scalar values', () => {
   for (const value of scalarCases) {
     assert.deepStrictEqual(encodeSync(value), v8.serialize(value));
@@ -77,8 +89,81 @@ test('round-trips ArrayBuffer and Uint8Array without base64', () => {
   assert.deepStrictEqual(decodedBytes, bytes);
 });
 
+function viewBytes(value) {
+  return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+}
+
+test('round-trips every Node 22 typed array and DataView', () => {
+  const views = [
+    new Int8Array([-1, 2]),
+    new Uint8Array([1, 2]),
+    new Uint8ClampedArray([1, 255]),
+    new Int16Array([-1, 2]),
+    new Uint16Array([1, 65535]),
+    new Int32Array([-1, 2]),
+    new Uint32Array([1, 0xffffffff]),
+    new Float32Array([1.5, -2.25]),
+    new Float64Array([Math.PI]),
+    new BigInt64Array([-1n, 2n]),
+    new BigUint64Array([1n, 2n]),
+    new DataView(Uint8Array.from([9, 1, 2, 9]).buffer, 1, 2),
+  ];
+
+  for (const value of views) {
+    const encoded = encodeSync(value);
+    const fromWriter = v8.deserialize(encoded);
+    assert.equal(fromWriter.constructor, value.constructor);
+    assert.deepStrictEqual(viewBytes(fromWriter), viewBytes(value));
+
+    const nativeRoundTrip = decodeSync(encoded);
+    assert.equal(nativeRoundTrip.constructor, value.constructor);
+    assert.deepStrictEqual(viewBytes(nativeRoundTrip), viewBytes(value));
+
+    const fromReader = decodeSync(v8.serialize(value));
+    assert.equal(fromReader.constructor, value.constructor);
+    assert.deepStrictEqual(viewBytes(fromReader), viewBytes(value));
+  }
+});
+
+test('rejects detached buffers and views instead of encoding empty values', () => {
+  for (const value of [
+    new ArrayBuffer(2),
+    new Int16Array([1, 2]),
+    new DataView(Uint8Array.from([1, 2]).buffer),
+  ]) {
+    const buffer = value instanceof ArrayBuffer ? value : value.buffer;
+    structuredClone(buffer, { transfer: [buffer] });
+    assert.throws(() => encodeSync(value), /detached ArrayBuffer/);
+  }
+});
+
+test('rejects SharedArrayBuffer-backed views', () => {
+  const view = new Int16Array(new SharedArrayBuffer(4));
+  assert.throws(() => encodeSync(view), /SharedArrayBuffer/);
+});
+
+test('rejects resizable ArrayBuffers and their views', () => {
+  const buffer = new ArrayBuffer(4, { maxByteLength: 8 });
+  Object.defineProperty(buffer, 'resizable', { value: false });
+  assert.throws(() => encodeSync(buffer), /resizable ArrayBuffer/);
+  assert.throws(
+    () => encodeAsync(buffer, () => {}),
+    /resizable ArrayBuffer/,
+  );
+
+  const viewBuffer = new ArrayBuffer(4, { maxByteLength: 8 });
+  assert.throws(
+    () => encodeSync(new Int16Array(viewBuffer)),
+    /resizable ArrayBuffer/,
+  );
+});
+
 test('encodes on a worker and returns through a thread-safe callback', async () => {
-  const value = { id: 7, blob: Uint8Array.from([9, 8, 7]) };
+  const value = {
+    id: 7,
+    created: new Date(1234),
+    samples: new Int16Array([-1, 2]),
+  };
   const encoded = await new Promise((resolve, reject) => {
     encodeAsync(value, (error, buffer) => {
       if (error) reject(error);
@@ -92,8 +177,6 @@ test('rejects values that cannot be represented by the v1 format', () => {
   const cyclic = {};
   cyclic.self = cyclic;
   assert.throws(() => encodeSync(cyclic), /cyclic/);
-  assert.throws(() => encodeSync(new Date()), /plain objects/);
-  assert.throws(() => encodeSync(new Uint16Array([1])), /Uint8Array/);
   assert.throws(() => encodeSync([, 1]), /sparse arrays/);
 
   const arrayWithProperty = [1];
@@ -157,7 +240,11 @@ test('reader handles Node host-object and native Uint8Array encodings', () => {
 });
 
 test('decodes in a native worker without accessing V8 off-thread', async () => {
-  const value = { id: 7, blob: Uint8Array.from([9, 8, 7]) };
+  const value = {
+    id: 7,
+    created: new Date(1234),
+    samples: new Int16Array([-1, 2]),
+  };
   const decoded = await new Promise((resolve, reject) => {
     decodeAsync(v8.serialize(value), (error, result) => {
       if (error) reject(error);

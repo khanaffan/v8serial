@@ -100,8 +100,7 @@ and reads these bytes in host byte order. It normalizes deserialized NaNs to a
 quiet NaN.
 
 This makes doubles non-portable between little-endian and big-endian systems.
-`v8serial` currently emits little-endian bytes and therefore targets
-little-endian Node.js platforms.
+`v8serial` follows V8 by reading and writing them in host byte order.
 
 ### Padding
 
@@ -262,7 +261,8 @@ propertyCount:varuint32
 The reader counts decoded key/value pairs and requires that count to equal the
 terminal count. Keys must be valid JavaScript property keys. V8's writer
 serializes own enumerable properties and may execute accessors while obtaining
-values.
+values. It snapshots keys before reading values, skips a snapshotted property
+that a previous accessor deleted, and ignores properties added afterward.
 
 ### Dense array
 
@@ -652,22 +652,24 @@ requirements of the V8 wire format.
 The implementation in this repository emits valid version-15 forms for:
 
 - undefined, null and booleans;
-- signed int32 and double;
+- signed and unsigned int32, double and Date;
 - UTF-8, Latin-1 and UTF-16 strings;
 - plain objects;
 - dense arrays without named properties;
 - ordinary ArrayBuffers;
-- ordinary Uint8Array views with offset zero and flags zero.
+- Node 22 typed-array and DataView forms with offset zero and flags zero.
 
-Its standalone C++ reader accepts those forms, unsigned-int32 values, and
-Node's host-object encoding for Uint8Array and Buffer. It validates bounds,
-container terminal counts, view ranges, version and complete input
+Its standalone C++ reader accepts those forms and Node's host-object encoding
+for Node 22 typed arrays, DataView and Buffer. It also ignores legacy
+`kVerifyObjectCount` markers as V8 does. It validates bounds, container
+terminal counts, view ranges and alignment, version and complete input
 consumption, and can operate on a native worker thread without V8 or N-API.
 
-It does not currently implement references/cycles, sparse arrays, other view
-types, BigInt, Date, boxed primitives, RegExp, Map, Set, Error, resizable,
-shared or transferred buffers, WebAssembly values, shared heap objects or host
-objects.
+It does not currently implement references/cycles, array holes, named array
+properties, Float16Array, BigInt, boxed primitives, RegExp, Map, Set, Error,
+resizable, shared or transferred buffers, WebAssembly values, shared heap
+objects or application-defined host objects. It accepts sparse array wire form
+only when every index is present in order.
 
 Conformance means the supported output is accepted by the Node 22.20.0
 version-15 parser. It does not mean every buffer is byte-identical to

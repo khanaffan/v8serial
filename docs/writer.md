@@ -69,7 +69,9 @@ should not be reused after `take()`.
 | `null()` | JavaScript `null` |
 | `boolean(bool)` | Boolean |
 | `int32(int32_t)` | ZigZag-varint signed integer |
+| `uint32(uint32_t)` | Unsigned varint integer |
 | `number(double)` | IEEE-754 double |
+| `date(double)` | Date milliseconds since the Unix epoch |
 | `string(std::string_view)` | UTF-8 string |
 | `string(std::u16string_view)` | Latin-1 or UTF-16 string |
 
@@ -115,15 +117,17 @@ supported.
 ```cpp
 writer.arrayBuffer(data, size);
 writer.uint8Array(data, size);
+writer.arrayBufferView(v8serial::ArrayBufferViewType::Int16Array, data, size);
 ```
 
 Both methods copy `size` bytes into the output stream, so `data` only needs to
 remain valid for the duration of the call. A null pointer is accepted only
 when `size == 0`.
 
-`uint8Array()` emits an ordinary ArrayBuffer immediately followed by a
-Uint8Array view with offset zero, matching V8's native view grammar. It does
-not emit Node's host-object representation.
+`uint8Array()` and `arrayBufferView()` emit an ordinary ArrayBuffer immediately
+followed by a view with offset zero, matching V8's native view grammar. They do
+not emit Node's host-object representation. Typed-array byte lengths must be
+multiples of their element sizes.
 
 ## Errors and limits
 
@@ -145,9 +149,10 @@ state and performs no V8 or N-API calls.
 
 ## Format scope
 
-The writer supports undefined, null, booleans, int32, double, strings, dense
-arrays, plain string-keyed objects, ArrayBuffer and Uint8Array. It does not
-preserve shared identity or cycles and does not support other V8 tags.
+The writer supports undefined, null, booleans, signed and unsigned 32-bit
+integers, double, Date, strings, dense arrays, plain string-keyed objects,
+ArrayBuffer, Node 22 typed arrays and DataView. It does not preserve shared
+identity or cycles and does not support other V8 tags.
 
 See [V8 serialization wire format version 15](v8-format.md) for byte-level
 details.

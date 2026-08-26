@@ -90,6 +90,12 @@ void TestWriterInvariants() {
     v8serial::Writer writer;
     writer.arrayBuffer(nullptr, 1);
   });
+  ExpectThrows<std::invalid_argument>([] {
+    const uint8_t byte = 0;
+    v8serial::Writer writer;
+    writer.arrayBufferView(v8serial::ArrayBufferViewType::Int16Array,
+                           &byte, 1);
+  });
 }
 
 void TestReaderValidation() {
@@ -128,6 +134,44 @@ void TestNativeViewWithOffset() {
   assert(decoded.binary == std::vector<uint8_t>({1, 2, 3}));
 }
 
+void TestExtendedScalarsAndViews() {
+  {
+    v8serial::Writer writer;
+    writer.uint32(UINT32_MAX);
+    const v8serial::DecodedValue decoded =
+        v8serial::Reader(writer.take()).read();
+    assert(decoded.type == v8serial::DecodedType::Uint32);
+    assert(decoded.uint32 == UINT32_MAX);
+  }
+  {
+    v8serial::Writer writer;
+    writer.date(1234.5);
+    const v8serial::DecodedValue decoded =
+        v8serial::Reader(writer.take()).read();
+    assert(decoded.type == v8serial::DecodedType::Date);
+    assert(decoded.date_milliseconds == 1234.5);
+  }
+  {
+    const uint8_t bytes[] = {0x01, 0x00, 0xfe, 0xff};
+    v8serial::Writer writer;
+    writer.arrayBufferView(v8serial::ArrayBufferViewType::Int16Array,
+                           bytes, sizeof(bytes));
+    const v8serial::DecodedValue decoded =
+        v8serial::Reader(writer.take()).read();
+    assert(decoded.type == v8serial::DecodedType::ArrayBufferView);
+    assert(decoded.view_type == v8serial::ArrayBufferViewType::Int16Array);
+    assert(decoded.binary == std::vector<uint8_t>({1, 0, 0xfe, 0xff}));
+  }
+  {
+    const std::vector<uint8_t> bytes = {
+        0xff, 0x0f, '?', 0x7f, 'I', 0x54,
+    };
+    const v8serial::DecodedValue decoded = v8serial::Reader(bytes).read();
+    assert(decoded.type == v8serial::DecodedType::Int32);
+    assert(decoded.int32 == 42);
+  }
+}
+
 void TestLongStringPaths() {
   const std::u16string latin1(4096, u'\xe9');
   v8serial::Writer latin1_writer(latin1.size() + 16);
@@ -152,5 +196,6 @@ int main() {
   TestWriterInvariants();
   TestReaderValidation();
   TestNativeViewWithOffset();
+  TestExtendedScalarsAndViews();
   TestLongStringPaths();
 }

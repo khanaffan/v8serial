@@ -14,6 +14,17 @@ function hex(value) {
   return Buffer.from(value.replaceAll(/\s/g, ''), 'hex');
 }
 
+function nativeDoubleHex(value) {
+  const bytes = new Uint8Array(new Float64Array([value]).buffer);
+  return Buffer.from(bytes).toString('hex');
+}
+
+function nativeUtf16Hex(value) {
+  const units = Uint16Array.from(value, (character) =>
+    character.charCodeAt(0));
+  return Buffer.from(units.buffer).toString('hex');
+}
+
 test('serializer matches source-derived version-15 golden vectors', () => {
   const vectors = [
     [undefined, 'ff0f5f'],
@@ -27,12 +38,13 @@ test('serializer matches source-derived version-15 golden vectors', () => {
     [-42, 'ff0f4953'],
     [2147483647, 'ff0f49feffffff0f'],
     [-2147483648, 'ff0f49ffffffff0f'],
-    [-0, 'ff0f4e0000000000000080'],
-    [1.5, 'ff0f4e000000000000f83f'],
+    [-0, `ff0f4e${nativeDoubleHex(-0)}`],
+    [1.5, `ff0f4e${nativeDoubleHex(1.5)}`],
+    [new Date(1234), `ff0f44${nativeDoubleHex(1234)}`],
     ['', 'ff0f2200'],
     ['A', 'ff0f220141'],
     ['\u00ff', 'ff0f2201ff'],
-    ['\u0100', 'ff0f63020001'],
+    ['\u0100', `ff0f6302${nativeUtf16Hex('\u0100')}`],
     [{}, 'ff0f6f7b00'],
     [[], 'ff0f4100240000'],
     [[null, true, 42], 'ff0f410330544954240003'],
@@ -70,6 +82,21 @@ test('serializer matches V8 choices across numeric and string boundaries', () =>
   }
 });
 
+test('reader accepts complete arrays encoded in V8 sparse wire form', () => {
+  const sparseEncoding = hex(
+    'ff0f 61 03 4900 220161 4902 220162 4904 220163 40 03 03',
+  );
+  assert.deepStrictEqual(decodeSync(sparseEncoding), ['a', 'b', 'c']);
+});
+
+test('reader ignores legacy object-count verification markers', () => {
+  assert.equal(decodeSync(hex('ff0f 3f7f 4954')), 42);
+  assert.throws(
+    () => decodeSync(hex('ff0f 6f 3f00 7b00')),
+    /V8 decode error/,
+  );
+});
+
 test('native Uint8Array writer emits the standard buffer-plus-view grammar', () => {
   const bytes = Uint8Array.from([1, 2, 3]);
   assert.deepStrictEqual(
@@ -83,16 +110,32 @@ test('native Uint8Array writer emits the standard buffer-plus-view grammar', () 
   assert.deepStrictEqual(v8.deserialize(offsetView), bytes);
 });
 
-test('reader accepts Node host-object forms for Uint8Array and Buffer', () => {
+test('reader accepts Node host-object forms for binary views', () => {
   for (const value of [
-    Uint8Array.from([]),
-    Uint8Array.from([1, 2, 3]),
+    new Int8Array([-1, 2]),
+    new Uint8Array([1, 2, 3]),
+    new Uint8ClampedArray([1, 255]),
+    new Int16Array([-1, 2]),
+    new Uint16Array([1, 65535]),
+    new Int32Array([-1, 2]),
+    new Uint32Array([1, 0xffffffff]),
+    new Float32Array([1.5, -2.25]),
+    new Float64Array([Math.PI]),
+    new BigInt64Array([-1n, 2n]),
+    new BigUint64Array([1n, 2n]),
+    new DataView(Uint8Array.from([1, 2, 3]).buffer),
     Buffer.from([]),
     Buffer.from([4, 5, 6]),
   ]) {
     const decoded = decodeSync(v8.serialize(value));
-    assert.ok(decoded instanceof Uint8Array);
-    assert.deepStrictEqual(decoded, new Uint8Array(value));
+    const expectedConstructor = Buffer.isBuffer(value)
+      ? Uint8Array
+      : value.constructor;
+    assert.equal(decoded.constructor, expectedConstructor);
+    assert.deepStrictEqual(
+      Buffer.from(decoded.buffer, decoded.byteOffset, decoded.byteLength),
+      Buffer.from(value.buffer, value.byteOffset, value.byteLength),
+    );
   }
 });
 
@@ -194,7 +237,10 @@ test('reader rejects malformed structural fields and unsupported tags', () => {
     'ff0f420201', // ArrayBuffer payload truncated
     'ff0f42030102035642020300', // view exceeds backing buffer
     'ff0f42030102035642000301', // unsupported view flags
-    'ff0f5c0200', // unsupported Node host-object type
+    'ff0f5c0e00', // unsupported Node host-object type
+    'ff0f5c0301ff', // Int16Array byte length is misaligned
+    'ff0f610349002201614904220163400203', // sparse array hole
+    'ff0f61014900220161220178220162400201', // named sparse property
     'ff0f30ff', // trailing non-padding data
   ];
   for (const bytes of invalid) {
@@ -223,7 +269,6 @@ test('unsupported V8 types fail explicitly instead of being misdecoded', () => {
   const shared = {};
   const unsupported = [
     1n,
-    new Date(0),
     /x/gi,
     new Map([['x', 1]]),
     new Set([1]),
