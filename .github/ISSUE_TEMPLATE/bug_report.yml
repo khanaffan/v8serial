@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible problem in v8serial
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Follow SECURITY.md instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest code sample or repository that reproduces the problem.
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      placeholder: v22.x.x
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: Ubuntu 24.04 x86-64
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Complete error output
+      render: text
+    validations:
+      required: true

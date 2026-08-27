@@ -1,5 +1,9 @@
 # v8serial
 
+[![CI](https://github.com/khanaffan/v8serial/actions/workflows/ci.yml/badge.svg)](https://github.com/khanaffan/v8serial/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/khanaffan/v8serial)](https://github.com/khanaffan/v8serial/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `v8serial` reads and writes V8 serialization-format buffers in C++ without
 linking V8. Node.js can reconstruct writer output with `v8.deserialize()`, and
 native worker threads can parse supported `v8.serialize()` output without
