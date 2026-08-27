@@ -200,13 +200,12 @@ struct WriterReuseResult {
 };
 
 template <typename Write>
-WriterReuseResult BenchmarkWriterReuse(size_t initial_capacity,
+WriterReuseResult BenchmarkWriterReuse(Encode fresh_encode,
+                                       size_t initial_capacity,
                                        size_t iterations, Write write) {
   constexpr size_t kWarmupIterations = 1000;
   for (size_t index = 0; index < kWarmupIterations; ++index) {
-    v8serial::Writer writer(initial_capacity);
-    write(writer);
-    sink += writer.size();
+    sink += fresh_encode().size();
   }
 
   v8serial::Writer reused_writer(initial_capacity);
@@ -217,9 +216,8 @@ WriterReuseResult BenchmarkWriterReuse(size_t initial_capacity,
   }
 
   const double fresh_ns = MedianNanoseconds(iterations, [&] {
-    v8serial::Writer writer(initial_capacity);
-    write(writer);
-    sink += writer.size();
+    const std::vector<uint8_t> bytes = fresh_encode();
+    sink += bytes.size();
   });
   const double reused_ns = MedianNanoseconds(iterations, [&] {
     reused_writer.reset();
@@ -266,12 +264,13 @@ int main() {
   for (const Scenario& scenario : scenarios) Run(scenario);
 
   const WriterReuseResult scalar_reuse =
-      BenchmarkWriterReuse(16, 500000,
+      BenchmarkWriterReuse(EncodeScalar, 16, 500000,
                            [](v8serial::Writer& writer) { writer.int32(42); });
   const WriterReuseResult geometry_reuse =
-      BenchmarkWriterReuse(512, 30000, [](v8serial::Writer& writer) {
-        WriteGeometry(writer, nullptr, 0, false);
-      });
+      BenchmarkWriterReuse(EncodeGeometry, 512, 30000,
+                           [](v8serial::Writer& writer) {
+                             WriteGeometry(writer, nullptr, 0, false);
+                           });
   std::cout << "writer-reuse-scalar\t" << scalar_reuse.fresh_ns << '\t'
             << scalar_reuse.reused_ns << '\t' << scalar_reuse.wire_bytes
             << '\n';
