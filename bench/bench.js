@@ -353,7 +353,7 @@ function renderMarkdown(report) {
     '- Encode and decode are measured separately; round trip is the sum of their medians.',
     ...(writerReuse.length > 0
       ? [
-          '- The writer-reuse comparison measures only C++ encoding: the one-shot path constructs a capacity-reserved `Writer`, moves its vector out with `take()`, and destroys that vector per message; the reuse path keeps one `Writer`, calls `reset()`, and consumes `size()`. Neither path copies the completed payload bytes to a downstream consumer.',
+          '- The writer-reuse comparison measures only C++ encoding: the one-shot path constructs a capacity-reserved `Writer`, moves its vector out with `take()`, and destroys that vector per message; the reuse path keeps one `Writer` and calls `reset()`. Both paths consume representative output bytes to prevent compiler elision, but neither copies the completed payload to a downstream consumer.',
         ]
       : []),
     '- `C++ headers (SIMD)` calls `Writer` and `Reader` directly with native values and enables the architecture-specific string paths.',

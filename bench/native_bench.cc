@@ -14,8 +14,17 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 using Encode = std::vector<uint8_t> (*)();
+using ConsumeBytes = void (*)(const uint8_t*, size_t);
 
 volatile uint64_t sink = 0;
+
+void ConsumeEncodedBytes(const uint8_t* data, size_t size) {
+  sink += size;
+  if (size == 0) return;
+  sink += data[0];
+  sink += data[size / 2];
+  sink += data[size - 1];
+}
 
 void WriteNumber(v8serial::Writer& writer, double value) {
   if (std::isfinite(value) &&
@@ -207,25 +216,27 @@ WriterReuseResult BenchmarkWriterReuse(Encode fresh_encode,
   // Prevent release builds from scalar-replacing the one-shot vector and
   // eliding the allocation/free lifecycle this benchmark is intended to time.
   Encode volatile opaque_fresh_encode = fresh_encode;
+  ConsumeBytes volatile opaque_consume = ConsumeEncodedBytes;
   for (size_t index = 0; index < kWarmupIterations; ++index) {
-    sink += opaque_fresh_encode().size();
+    const std::vector<uint8_t> bytes = opaque_fresh_encode();
+    opaque_consume(bytes.data(), bytes.size());
   }
 
   v8serial::Writer reused_writer(initial_capacity);
   for (size_t index = 0; index < kWarmupIterations; ++index) {
     reused_writer.reset();
     write(reused_writer);
-    sink += reused_writer.size();
+    opaque_consume(reused_writer.data(), reused_writer.size());
   }
 
   const double fresh_ns = MedianNanoseconds(iterations, [&] {
     const std::vector<uint8_t> bytes = opaque_fresh_encode();
-    sink += bytes.size();
+    opaque_consume(bytes.data(), bytes.size());
   });
   const double reused_ns = MedianNanoseconds(iterations, [&] {
     reused_writer.reset();
     write(reused_writer);
-    sink += reused_writer.size();
+    opaque_consume(reused_writer.data(), reused_writer.size());
   });
   return {fresh_ns, reused_ns, reused_writer.size()};
 }
