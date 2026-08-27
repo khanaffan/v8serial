@@ -204,8 +204,11 @@ WriterReuseResult BenchmarkWriterReuse(Encode fresh_encode,
                                        size_t initial_capacity,
                                        size_t iterations, Write write) {
   constexpr size_t kWarmupIterations = 1000;
+  // Prevent release builds from scalar-replacing the one-shot vector and
+  // eliding the allocation/free lifecycle this benchmark is intended to time.
+  Encode volatile opaque_fresh_encode = fresh_encode;
   for (size_t index = 0; index < kWarmupIterations; ++index) {
-    sink += fresh_encode().size();
+    sink += opaque_fresh_encode().size();
   }
 
   v8serial::Writer reused_writer(initial_capacity);
@@ -216,7 +219,7 @@ WriterReuseResult BenchmarkWriterReuse(Encode fresh_encode,
   }
 
   const double fresh_ns = MedianNanoseconds(iterations, [&] {
-    const std::vector<uint8_t> bytes = fresh_encode();
+    const std::vector<uint8_t> bytes = opaque_fresh_encode();
     sink += bytes.size();
   });
   const double reused_ns = MedianNanoseconds(iterations, [&] {

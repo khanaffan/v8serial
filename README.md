@@ -98,38 +98,40 @@ writer.endArray();
 This is not a complete implementation of every V8 serialization tag. It
 implements the core subset needed for ordinary data objects and binary blobs.
 
+**Status:** ✅ Supported · ❌ Unsupported · ⚠️ Limited
+
 | Value or feature | Writer | Reader | Notes |
 |---|:---:|:---:|---|
-| `undefined`, `null`, Boolean | Yes | Yes | |
-| Signed int32 | Yes | Yes | ZigZag varint |
-| Unsigned uint32 | Yes | Yes | Explicit C++ writer method |
-| Double, NaN, infinities, `-0` | Yes | Yes | IEEE-754 binary64 |
-| Latin-1 string | Yes | Yes | |
-| UTF-8 string | Yes | Yes | Writer expects valid UTF-8 |
-| UTF-16 string | Yes | Yes | Includes V8 alignment padding |
-| Plain object | Yes | Yes | String keys; reader also accepts integer keys |
-| Dense array | Yes | Yes | No holes or named properties |
-| Sparse array wire form | No | Yes | Every index must be present in order |
-| Ordinary `ArrayBuffer` | Yes | Yes | |
-| Native typed arrays and `DataView` | Yes | Yes | Writer uses offset zero and flags zero |
-| Node host-object typed arrays/DataView | No | Yes | Produced by Node's `v8.serialize()` |
-| Node host-object `Buffer` | No | Yes | Decodes as `DecodedType::Uint8Array` |
-| Shared references | No | No | Identity is not preserved |
-| Cyclic objects | No | No | Rejected rather than emitting references |
-| Sparse arrays and holes | No | No | Sparse wire form is accepted only for complete arrays |
-| Named array properties | No | No | |
-| BigInt | No | No | Includes boxed BigInt |
-| Date | Yes | Yes | Milliseconds since epoch, including invalid Date |
-| Boxed Boolean, Number, String | No | No | |
-| RegExp | No | No | |
-| Map and Set | No | No | |
-| Error objects | No | No | |
-| Resizable or transferred ArrayBuffer | No | No | |
-| `SharedArrayBuffer` | No | No | Requires delegate-managed IDs |
-| V8 shared heap objects | No | No | Version-15 shared-value tag |
-| WebAssembly module or memory | No | No | Requires a V8 delegate |
-| Custom host objects | No | Limited | Node binary-view forms only |
-| Legacy formats (versions 0-14) | No | No | Exact version 15 is required |
+| `undefined`, `null`, Boolean | ✅ | ✅ | |
+| Signed int32 | ✅ | ✅ | ZigZag varint |
+| Unsigned uint32 | ✅ | ✅ | Explicit C++ writer method |
+| Double, NaN, infinities, `-0` | ✅ | ✅ | IEEE-754 binary64 |
+| Latin-1 string | ✅ | ✅ | |
+| UTF-8 string | ✅ | ✅ | Writer expects valid UTF-8 |
+| UTF-16 string | ✅ | ✅ | Includes V8 alignment padding |
+| Plain object | ✅ | ✅ | String keys; reader also accepts integer keys |
+| Dense array | ✅ | ✅ | No holes or named properties |
+| Sparse array wire form | ❌ | ✅ | Every index must be present in order |
+| Ordinary `ArrayBuffer` | ✅ | ✅ | |
+| Native typed arrays and `DataView` | ✅ | ✅ | Writer uses offset zero and flags zero |
+| Node host-object typed arrays/DataView | ❌ | ✅ | Produced by Node's `v8.serialize()` |
+| Node host-object `Buffer` | ❌ | ✅ | Decodes as `DecodedType::Uint8Array` |
+| Shared references | ❌ | ❌ | Identity is not preserved |
+| Cyclic objects | ❌ | ❌ | Rejected rather than emitting references |
+| Sparse arrays and holes | ❌ | ❌ | Sparse wire form is accepted only for complete arrays |
+| Named array properties | ❌ | ❌ | |
+| BigInt | ❌ | ❌ | Includes boxed BigInt |
+| Date | ✅ | ✅ | Milliseconds since epoch, including invalid Date |
+| Boxed Boolean, Number, String | ❌ | ❌ | |
+| RegExp | ❌ | ❌ | |
+| Map and Set | ❌ | ❌ | |
+| Error objects | ❌ | ❌ | |
+| Resizable or transferred ArrayBuffer | ❌ | ❌ | |
+| `SharedArrayBuffer` | ❌ | ❌ | Requires delegate-managed IDs |
+| V8 shared heap objects | ❌ | ❌ | Version-15 shared-value tag |
+| WebAssembly module or memory | ❌ | ❌ | Requires a V8 delegate |
+| Custom host objects | ❌ | ⚠️ | Node binary-view forms only |
+| Legacy formats (versions 0-14) | ❌ | ❌ | Exact version 15 is required |
 
 Unsupported writer inputs throw before producing a buffer. Unsupported reader
 tags throw `v8serial::DecodeError`; they are never silently interpreted as a
