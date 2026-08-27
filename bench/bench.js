@@ -391,7 +391,7 @@ function renderMarkdown(report) {
       '',
       '`reset()` clears message state and re-emits the wire header while retaining the writer buffer capacity. The table isolates that lifecycle benefit; it does not include copying the completed bytes into a queue, socket, or consumer-owned buffer. See the [writer guide](writer.md#reusing-buffer-capacity) for the ownership rules.',
       '',
-      '| Build | Payload | Fresh writer | Reused writer | Latency change | Speedup | Wire size |',
+      '| Build | Payload | One-shot `take()` | Reused `reset()` | Latency change | Speedup | Wire size |',
       '|---|---|---:|---:|---:|---:|---:|',
     );
     for (const scenario of ['scalar', 'geometry']) {
