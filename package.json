@@ -2,6 +2,7 @@
   "name": "v8serial",
   "version": "0.1.0",
   "description": "V8 serialization-format reader and writer for C++ without linking V8",
+  "license": "MIT",
   "private": true,
   "main": "index.js",
   "engines": {

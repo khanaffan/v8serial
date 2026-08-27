@@ -167,3 +167,10 @@ The test suite includes source-derived golden vectors, differential checks
 against Node's V8 implementation, deterministic generated value trees,
 malformed and truncated input, async concurrency and worker teardown, plus a
 standalone native C++ test executable.
+
+## Contributing and license
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and
+pull request guidance.
+
+v8serial is available under the [MIT License](LICENSE).
