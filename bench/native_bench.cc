@@ -171,46 +171,6 @@ std::vector<uint8_t> EncodeBlob(size_t size) {
 std::vector<uint8_t> EncodeBlob1k() { return EncodeBlob(1024); }
 std::vector<uint8_t> EncodeBlob1m() { return EncodeBlob(1024 * 1024); }
 
-double BenchGeometryFreshWriter(size_t iterations) {
-  std::vector<double> samples;
-  constexpr size_t kRounds = 7;
-  samples.reserve(kRounds);
-  for (size_t round = 0; round < kRounds; ++round) {
-    const auto start = Clock::now();
-    for (size_t index = 0; index < iterations; ++index) {
-      v8serial::Writer writer(512);
-      WriteGeometry(writer, nullptr, 0, false);
-      const std::vector<uint8_t> bytes = writer.take();
-      sink += bytes.size();
-    }
-    const auto elapsed = Clock::now() - start;
-    samples.push_back(
-        std::chrono::duration<double, std::nano>(elapsed).count() / iterations);
-  }
-  std::sort(samples.begin(), samples.end());
-  return samples[kRounds / 2];
-}
-
-double BenchGeometryReusedWriter(size_t iterations) {
-  std::vector<double> samples;
-  constexpr size_t kRounds = 7;
-  samples.reserve(kRounds);
-  v8serial::Writer writer(512);
-  for (size_t round = 0; round < kRounds; ++round) {
-    const auto start = Clock::now();
-    for (size_t index = 0; index < iterations; ++index) {
-      writer.reset();
-      WriteGeometry(writer, nullptr, 0, false);
-      sink += writer.size();
-    }
-    const auto elapsed = Clock::now() - start;
-    samples.push_back(
-        std::chrono::duration<double, std::nano>(elapsed).count() / iterations);
-  }
-  std::sort(samples.begin(), samples.end());
-  return samples[kRounds / 2];
-}
-
 struct Scenario {
   const char* name;
   Encode encode;
@@ -231,6 +191,42 @@ double MedianNanoseconds(size_t iterations, Operation operation) {
   }
   std::sort(samples.begin(), samples.end());
   return samples[kRounds / 2];
+}
+
+struct WriterReuseResult {
+  double fresh_ns;
+  double reused_ns;
+  size_t wire_bytes;
+};
+
+template <typename Write>
+WriterReuseResult BenchmarkWriterReuse(size_t initial_capacity,
+                                       size_t iterations, Write write) {
+  constexpr size_t kWarmupIterations = 1000;
+  for (size_t index = 0; index < kWarmupIterations; ++index) {
+    v8serial::Writer writer(initial_capacity);
+    write(writer);
+    sink += writer.size();
+  }
+
+  v8serial::Writer reused_writer(initial_capacity);
+  for (size_t index = 0; index < kWarmupIterations; ++index) {
+    reused_writer.reset();
+    write(reused_writer);
+    sink += reused_writer.size();
+  }
+
+  const double fresh_ns = MedianNanoseconds(iterations, [&] {
+    v8serial::Writer writer(initial_capacity);
+    write(writer);
+    sink += writer.size();
+  });
+  const double reused_ns = MedianNanoseconds(iterations, [&] {
+    reused_writer.reset();
+    write(reused_writer);
+    sink += reused_writer.size();
+  });
+  return {fresh_ns, reused_ns, reused_writer.size()};
 }
 
 void Run(const Scenario& scenario) {
@@ -269,11 +265,19 @@ int main() {
 
   for (const Scenario& scenario : scenarios) Run(scenario);
 
-  constexpr size_t kReuseIterations = 30000;
-  const double fresh_ns = BenchGeometryFreshWriter(kReuseIterations);
-  const double reused_ns = BenchGeometryReusedWriter(kReuseIterations);
-  std::cout << "geometry-writer-fresh\t" << fresh_ns << "\t-\t-\n";
-  std::cout << "geometry-writer-reused\t" << reused_ns << "\t-\t-\n";
+  const WriterReuseResult scalar_reuse =
+      BenchmarkWriterReuse(16, 500000,
+                           [](v8serial::Writer& writer) { writer.int32(42); });
+  const WriterReuseResult geometry_reuse =
+      BenchmarkWriterReuse(512, 30000, [](v8serial::Writer& writer) {
+        WriteGeometry(writer, nullptr, 0, false);
+      });
+  std::cout << "writer-reuse-scalar\t" << scalar_reuse.fresh_ns << '\t'
+            << scalar_reuse.reused_ns << '\t' << scalar_reuse.wire_bytes
+            << '\n';
+  std::cout << "writer-reuse-geometry\t" << geometry_reuse.fresh_ns << '\t'
+            << geometry_reuse.reused_ns << '\t' << geometry_reuse.wire_bytes
+            << '\n';
 
   return sink == 0 ? 1 : 0;
 }

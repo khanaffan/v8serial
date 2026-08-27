@@ -180,11 +180,22 @@ function benchmarkCodec(scenario, codec, encode, decode) {
   };
 }
 
-function readNativeResults(executable, codec) {
+function readNativeOutput(executable, codec) {
   const output = execFileSync(executable, [], { encoding: 'utf8' });
   const results = new Map();
+  const writerReuse = [];
   for (const line of output.trim().split('\n')) {
     const [scenario, encodeNs, decodeNs, wireBytes] = line.split('\t');
+    if (scenario.startsWith('writer-reuse-')) {
+      writerReuse.push({
+        scenario: scenario.slice('writer-reuse-'.length),
+        codec,
+        fresh_ns: Number(encodeNs),
+        reused_ns: Number(decodeNs),
+        wire_bytes: Number(wireBytes),
+      });
+      continue;
+    }
     results.set(scenario, {
       scenario,
       codec,
@@ -194,7 +205,7 @@ function readNativeResults(executable, codec) {
       wire_bytes: Number(wireBytes),
     });
   }
-  return results;
+  return { results, writerReuse };
 }
 
 function formatTime(nanoseconds) {
@@ -207,6 +218,13 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+}
+
+function formatLatencyChange(freshNs, reusedNs) {
+  const percent = (1 - reusedNs / freshNs) * 100;
+  return percent >= 0
+    ? `${percent.toFixed(1)}% lower`
+    : `${(-percent).toFixed(1)}% higher`;
 }
 
 function escapeXml(text) {
@@ -313,6 +331,13 @@ function renderMarkdown(report) {
   const blobBase64 = result('blob-1m', 'JSON base64');
   const latin1Simd = result('latin1-4k', 'C++ headers (SIMD)');
   const latin1Scalar = result('latin1-4k', 'C++ headers (scalar)');
+  const writerReuse = report.writer_reuse ?? [];
+  const reuseResult = (scenario, codec) =>
+    writerReuse.find(
+      (row) => row.scenario === scenario && row.codec === codec,
+    );
+  const scalarReuse = reuseResult('scalar', 'C++ headers (SIMD)');
+  const geometryReuse = reuseResult('geometry', 'C++ headers (SIMD)');
 
   const lines = [
     '# Performance',
@@ -326,6 +351,11 @@ function renderMarkdown(report) {
     '- Seven timed rounds per operation; tables report the median nanoseconds per operation.',
     '- Every operation is warmed up first and its result is consumed.',
     '- Encode and decode are measured separately; round trip is the sum of their medians.',
+    ...(writerReuse.length > 0
+      ? [
+          '- The writer-reuse comparison measures only C++ encoding: the fresh path constructs and destroys a capacity-reserved `Writer` per message, while the reuse path keeps one `Writer` and calls `reset()`. Both consume `size()` and exclude copying bytes to a downstream consumer.',
+        ]
+      : []),
     '- `C++ headers (SIMD)` calls `Writer` and `Reader` directly with native values and enables the architecture-specific string paths.',
     '- `C++ headers (scalar)` builds the same benchmark with `V8SERIAL_DISABLE_SIMD=1` for a like-for-like baseline.',
     '- `v8serial addon` includes generic JavaScript object traversal and N-API boundary cost.',
@@ -343,10 +373,40 @@ function renderMarkdown(report) {
     `- For geometry with a 64-byte blob, direct C++ headers are ${faster(geometryBase64, geometryHeaders)}x faster than JSON base64. The generic addon bridge is ${(geometryAddon.roundtrip_ns / geometryBase64.roundtrip_ns).toFixed(1)}x the JSON-base64 latency because JavaScript property traversal dominates this small payload.`,
     `- For a 1 MiB blob, direct C++ headers are ${faster(blobBase64, blobHeaders)}x faster and the addon bridge is ${faster(blobBase64, blobAddon)}x faster than JSON base64, while avoiding base64's wire-size expansion.`,
     '- Node V8 is exceptionally fast for large typed arrays because its host-object deserializer may return a view into the serialized input; the standalone reader instead returns owning native bytes.',
-    '',
-    '## Results',
+    ...(scalarReuse && geometryReuse
+      ? [
+          `- On this run, reusing one reserved \`Writer\` with \`reset()\` measured ${formatLatencyChange(scalarReuse.fresh_ns, scalarReuse.reused_ns)} latency for scalar encoding and ${formatLatencyChange(geometryReuse.fresh_ns, geometryReuse.reused_ns)} for nested geometry versus constructing and destroying a writer for every message.`,
+        ]
+      : []),
     '',
   ];
+
+  if (writerReuse.length > 0) {
+    const labels = new Map([
+      ['scalar', 'Scalar int32'],
+      ['geometry', 'Nested geometry'],
+    ]);
+    lines.push(
+      '## Writer buffer reuse',
+      '',
+      '`reset()` clears message state and re-emits the wire header while retaining the writer buffer capacity. The table isolates that lifecycle benefit; it does not include copying the completed bytes into a queue, socket, or consumer-owned buffer. See the [writer guide](writer.md#reusing-buffer-capacity) for the ownership rules.',
+      '',
+      '| Build | Payload | Fresh writer | Reused writer | Latency change | Speedup | Wire size |',
+      '|---|---|---:|---:|---:|---:|---:|',
+    );
+    for (const scenario of ['scalar', 'geometry']) {
+      for (const codec of ['C++ headers (SIMD)', 'C++ headers (scalar)']) {
+        const row = reuseResult(scenario, codec);
+        if (!row) continue;
+        lines.push(
+          `| ${codec} | ${labels.get(scenario)} | ${formatTime(row.fresh_ns)} | ${formatTime(row.reused_ns)} | ${formatLatencyChange(row.fresh_ns, row.reused_ns)} | ${(row.fresh_ns / row.reused_ns).toFixed(2)}x | ${formatBytes(row.wire_bytes)} |`,
+        );
+      }
+    }
+    lines.push('');
+  }
+
+  lines.push('## Results', '');
 
   for (const scenario of scenarios) {
     const rows = report.results.filter(
@@ -400,12 +460,12 @@ if (process.argv.includes('--render-only')) {
   process.exit(0);
 }
 
-const nativeResultSets = [
-  readNativeResults(
+const nativeOutputs = [
+  readNativeOutput(
     nativeExecutable('v8serial_native_bench'),
     'C++ headers (SIMD)',
   ),
-  readNativeResults(
+  readNativeOutput(
     nativeExecutable('v8serial_native_bench_scalar'),
     'C++ headers (scalar)',
   ),
@@ -413,8 +473,8 @@ const nativeResultSets = [
 const results = [];
 
 for (const scenario of scenarios) {
-  for (const nativeResults of nativeResultSets) {
-    const native = nativeResults.get(scenario.id);
+  for (const nativeOutput of nativeOutputs) {
+    const native = nativeOutput.results.get(scenario.id);
     if (!native) throw new Error(`missing native result for ${scenario.id}`);
     native.label = scenario.label;
     results.push(native);
@@ -451,6 +511,17 @@ for (const scenario of scenarios) {
   }
 }
 
+const writerReuseLabels = new Map([
+  ['scalar', 'Scalar int32'],
+  ['geometry', 'Nested geometry'],
+]);
+const writerReuse = nativeOutputs.flatMap((output) =>
+  output.writerReuse.map((result) => ({
+    ...result,
+    label: writerReuseLabels.get(result.scenario) ?? result.scenario,
+  })),
+);
+
 const report = {
   environment: {
     generated_at: new Date().toISOString(),
@@ -468,6 +539,7 @@ const report = {
     binary: Boolean(binary),
   })),
   results,
+  writer_reuse: writerReuse,
 };
 
 writeReport(report);

@@ -62,6 +62,8 @@ or a container remains open. After `take()` the writer's internal buffer is
 empty and its state is unchanged; call `reset()` before writing another root
 value.
 
+### Reusing buffer capacity
+
 ```cpp
 void reset();
 const uint8_t* data() const;
@@ -78,10 +80,33 @@ the current message out (e.g. into a queue or socket write for a consumer
 thread) before calling `reset()` and encoding the next message — without
 transferring buffer ownership the way `take()` does.
 
+```cpp
+v8serial::Writer writer(512);
+
+for (const Record& record : records) {
+  writer.reset();
+  writeRecord(writer, record);
+
+  // This operation must copy the bytes before it returns.
+  copyToConsumerQueue(writer.data(), writer.size());
+}
+```
+
 This reuse pattern is same-thread and serial: reset the writer, write one
-message, copy/hand off its bytes, and only then reset again. A single
-`Writer` instance is still not safe for concurrent access from multiple
-threads.
+complete message, copy its bytes, and only then reset again. Do not enqueue the
+pointer returned by `data()` for later use: the next mutating writer call may
+invalidate it or overwrite its contents. `data()` and `size()` expose the
+current bytes but do not check that the root value and all containers are
+complete.
+
+Do not call `take()` in the reuse loop. It moves the vector out of the writer,
+so its allocation is no longer available for the next message. `reset()`
+retains the capacity of the writer's heap-backed vectors; `Writer` does not
+currently provide a stack-buffer or custom-allocator mode.
+
+A single `Writer` instance is still not safe for concurrent access from
+multiple threads. See the [writer buffer reuse benchmark](performance.md#writer-buffer-reuse)
+for measured fresh-versus-reused writer costs.
 
 ## Scalar methods
 

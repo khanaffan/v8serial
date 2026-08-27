@@ -50,6 +50,23 @@ writer.endObject();
 std::vector<uint8_t> encoded = writer.take();
 ```
 
+For repeated messages on one producer thread, keep the writer's allocated
+capacity instead of moving it out:
+
+```cpp
+v8serial::Writer writer(512);
+for (const Record& record : records) {
+  writer.reset();
+  writeRecord(writer, record);
+  copyToConsumerQueue(writer.data(), writer.size());
+}
+```
+
+The handoff must copy the bytes before the writer is changed again. Calling
+`take()` transfers the vector and therefore does not preserve its allocation
+for reuse. See the [writer ownership guide](docs/writer.md#reusing-buffer-capacity)
+and the [fresh-versus-reused benchmark](docs/performance.md#writer-buffer-reuse).
+
 The reader returns a native value tree:
 
 ```cpp
