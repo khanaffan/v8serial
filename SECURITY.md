@@ -2,11 +2,12 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest `0.1.x` release.
+Security fixes are provided for the latest `1.0.x` release.
 
 | Version | Supported |
 |---|:---:|
-| 0.1.x | Yes |
+| 1.0.x | Yes |
+| 0.1.x | No |
 | Earlier versions | No |
 
 ## Reporting a vulnerability

@@ -34,8 +34,13 @@ explicit Reader(const std::vector<uint8_t>& data);
 ```
 
 The reader borrows the input; it does not retain or mutate it. The bytes must
-remain valid until `read()` returns. Decoded strings and binary payloads are
-copied into the resulting native value tree.
+remain valid until `read()` or `readRows()` returns. `read()` copies decoded
+strings and binary payloads into the resulting native value tree.
+
+For native ArrayBuffer views, the reader validates the backing buffer and view
+metadata before copying only the selected byte range. It does not allocate an
+intermediate copy of the whole backing buffer. The result still owns its bytes
+and does not alias the serialized input.
 
 `read()` requires:
 
@@ -83,6 +88,37 @@ Read the member selected by `type`:
 Object properties preserve their serialized order. Integer property keys are
 converted to their decimal UTF-16 string representation.
 
+## Streaming positional rows
+
+`readRows()` consumes a root array of fixed-width positional rows without
+constructing a `DecodedValue` tree:
+
+```cpp
+uint32_t rowCount = v8serial::Reader(data, size).readRows(
+    5, [](uint32_t rowIndex, uint32_t columnIndex, uint32_t columnCount,
+          const v8serial::ScalarValue& value) {
+      bindValue(rowIndex, columnIndex, columnCount, value);
+    });
+```
+
+The callback runs once per scalar. Rows must have a consistent width and at
+least the requested minimum column count. Dense arrays and complete
+sparse-array wire forms are accepted; holes, named properties, nested values,
+and trailing bytes are rejected.
+
+`ScalarValue::type` selects Boolean, signed or unsigned 32-bit integer, double,
+null, undefined, Latin-1, UTF-8, or UTF-16 data. String bytes point directly
+into the serialized input. They are not null terminated or guaranteed to be
+aligned. Retain them only while also retaining the unchanged input.
+
+Validation is incremental: callbacks for earlier cells can run before a later
+malformed value is detected. Consumers that mutate a database or other external
+state must use a transaction or equivalent rollback mechanism.
+
+This API targets bulk data paths where materializing millions of native values
+or reading every JavaScript array element through N-API would add unnecessary
+allocation and boundary overhead.
+
 ## Accepted encodings
 
 The reader supports:
@@ -114,7 +150,8 @@ The reader validates before accessing or allocating payloads:
 - even UTF-16 byte lengths;
 - object property counts;
 - dense-array element and terminal lengths;
-- binary-view types, element alignment, offsets, lengths and flags;
+- binary-view types, element alignment, offsets, lengths and flags, before
+  copying only the selected range;
 - complete root-value consumption;
 - nesting depth, limited to 512.
 

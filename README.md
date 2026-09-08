@@ -78,6 +78,22 @@ v8serial::Reader reader(encoded.data(), encoded.size());
 v8serial::DecodedValue value = reader.read();
 ```
 
+For large homogeneous row sets, stream scalars directly instead of allocating
+an owning tree:
+
+```cpp
+v8serial::Reader(encoded.data(), encoded.size())
+    .readRows(5, [](uint32_t row, uint32_t column, uint32_t columnCount,
+                    const v8serial::ScalarValue& value) {
+      bindNativeValue(row, column, columnCount, value);
+    });
+```
+
+This path is intended for bulk imports and analysis results where per-value
+N-API calls or traversal of a large `Napi::Array` would dominate native work.
+String payloads are borrowed spans into the serialized input and must be
+consumed during the callback.
+
 `Reader` owns no global state and uses no V8 or N-API APIs, so independent
 instances can run concurrently on worker threads. The input bytes must remain
 alive until `read()` returns. It requires a version-15 header, consumes exactly
@@ -161,16 +177,22 @@ writer, parser, and version-compatibility details.
 npm install
 npm test
 npm run bench
+npm run bench:boundary
 ```
 
 See the generated [performance report](docs/performance.md) for comparisons
-between the direct C++ headers, addon bridge, Node's V8 codec, JSON byte arrays,
-and JSON base64 across scalar, geometry, collection, and blob payloads.
+between fine-grained N-API calls, bulk object traversal, serialized row
+streaming, the direct C++ headers, Node's V8 codec, JSON, SIMD string handling,
+and binary payloads.
 
 The test suite includes source-derived golden vectors, differential checks
 against Node's V8 implementation, deterministic generated value trees,
 malformed and truncated input, async concurrency and worker teardown, plus a
 standalone native C++ test executable.
+
+1.0 adds streaming `readRows()`, a bulk N-API boundary benchmark suite, and a
+single-copy native ArrayBuffer-view decode path. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Contributing and license
 
