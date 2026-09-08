@@ -22,6 +22,6 @@
     "node-addon-api": "8.9.2"
   },
   "devDependencies": {
-    "node-gyp": "11.5.0"
+    "node-gyp": "13.0.2"
   }
 }
