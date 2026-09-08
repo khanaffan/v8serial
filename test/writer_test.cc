@@ -124,6 +124,134 @@ void TestReaderValidation() {
   });
 }
 
+void TestStreamingRows() {
+  v8serial::Writer writer;
+  writer.beginArray(2);
+  writer.beginArray(5);
+  writer.string(u"alpha");
+  writer.int32(-7);
+  writer.number(1.5);
+  writer.boolean(true);
+  writer.null();
+  writer.endArray();
+  writer.beginArray(5);
+  writer.string(u"beta");
+  writer.uint32(UINT32_MAX);
+  writer.number(-2.25);
+  writer.boolean(false);
+  writer.undefined();
+  writer.endArray();
+  writer.endArray();
+  const std::vector<uint8_t> encoded = writer.take();
+
+  uint32_t calls = 0;
+  uint64_t checksum = 0;
+  const uint32_t rows = v8serial::Reader(encoded).readRows(
+      5, [&](uint32_t row, uint32_t column, uint32_t column_count,
+             const v8serial::ScalarValue& value) {
+        assert(column_count == 5);
+        assert(row < 2);
+        assert(column < column_count);
+        ++calls;
+        checksum += static_cast<uint64_t>(value.type) + row + column;
+        if (column == 0) {
+          assert(value.type == v8serial::ScalarType::Latin1String);
+          assert(value.bytes != nullptr);
+          checksum += value.byte_count;
+        }
+      });
+
+  assert(rows == 2);
+  assert(calls == 10);
+  assert(checksum != 0);
+}
+
+void TestStreamingRowsValidation() {
+  ExpectThrows<v8serial::DecodeError>([] {
+    v8serial::Writer writer;
+    writer.beginArray(2);
+    writer.beginArray(1);
+    writer.int32(1);
+    writer.endArray();
+    writer.beginArray(2);
+    writer.int32(2);
+    writer.int32(3);
+    writer.endArray();
+    writer.endArray();
+    v8serial::Reader(writer.take()).readRows(
+        1, [](uint32_t, uint32_t, uint32_t,
+              const v8serial::ScalarValue&) {});
+  });
+
+  ExpectThrows<v8serial::DecodeError>([] {
+    v8serial::Writer writer;
+    writer.beginArray(2);
+    writer.beginArray(0);
+    writer.endArray();
+    writer.beginArray(1);
+    writer.int32(1);
+    writer.endArray();
+    writer.endArray();
+    v8serial::Reader(writer.take()).readRows(
+        0, [](uint32_t, uint32_t, uint32_t,
+              const v8serial::ScalarValue&) {});
+  });
+
+  ExpectThrows<v8serial::DecodeError>([] {
+    v8serial::Writer writer;
+    writer.beginArray(1);
+    writer.beginArray(1);
+    writer.beginObject();
+    writer.key(u"value");
+    writer.int32(1);
+    writer.endObject();
+    writer.endArray();
+    writer.endArray();
+    v8serial::Reader(writer.take()).readRows(
+        1, [](uint32_t, uint32_t, uint32_t,
+              const v8serial::ScalarValue&) {});
+  });
+
+  ExpectThrows<v8serial::DecodeError>([] {
+    v8serial::Writer writer;
+    writer.beginArray(1);
+    writer.beginArray(1);
+    writer.int32(1);
+    writer.endArray();
+    writer.endArray();
+    v8serial::Reader(writer.take()).readRows(
+        2, [](uint32_t, uint32_t, uint32_t,
+              const v8serial::ScalarValue&) {});
+  });
+}
+
+void TestStreamingStringViews() {
+  v8serial::Writer writer;
+  writer.beginArray(1);
+  writer.beginArray(3);
+  writer.string(u"latin");
+  writer.string(std::string_view("\xc3\xa9"));
+  writer.string(u"\u0100");
+  writer.endArray();
+  writer.endArray();
+
+  const v8serial::ScalarType expected[] = {
+      v8serial::ScalarType::Latin1String,
+      v8serial::ScalarType::Utf8String,
+      v8serial::ScalarType::Utf16String,
+  };
+  uint32_t strings = 0;
+  v8serial::Reader(writer.take()).readRows(
+      3, [&](uint32_t, uint32_t column, uint32_t,
+             const v8serial::ScalarValue& value) {
+        assert(value.type == expected[column]);
+        assert(value.bytes != nullptr);
+        assert(value.byte_count > 0);
+        ++strings;
+      });
+  assert(strings == 3);
+}
+
 void TestNativeViewWithOffset() {
   const std::vector<uint8_t> bytes = {
       0xff, 0x0f, 'B', 0x05, 9, 1, 2, 3, 9,
@@ -132,6 +260,79 @@ void TestNativeViewWithOffset() {
   const v8serial::DecodedValue decoded = v8serial::Reader(bytes).read();
   assert(decoded.type == v8serial::DecodedType::Uint8Array);
   assert(decoded.binary == std::vector<uint8_t>({1, 2, 3}));
+}
+
+void TestNativeViewRangesAndOwnership() {
+  struct View {
+    uint8_t tag;
+    v8serial::ArrayBufferViewType type;
+  };
+  using Type = v8serial::ArrayBufferViewType;
+  const View views[] = {
+      {'b', Type::Int8Array}, {'B', Type::Uint8Array},
+      {'C', Type::Uint8ClampedArray}, {'w', Type::Int16Array},
+      {'W', Type::Uint16Array}, {'d', Type::Int32Array},
+      {'D', Type::Uint32Array}, {'f', Type::Float32Array},
+      {'F', Type::Float64Array}, {'q', Type::BigInt64Array},
+      {'Q', Type::BigUint64Array}, {'?', Type::DataView},
+  };
+  for (const View& view : views) {
+    const size_t element_size =
+        v8serial::detail::arrayBufferViewElementSize(view.type);
+    for (size_t offset = 0; offset <= 8; offset += element_size) {
+      for (size_t length = 0; length <= 8 - offset; length += element_size) {
+        std::vector<uint8_t> bytes = {
+            0xff, 0x0f, 'B', 8, 0, 1, 2, 3, 4, 5, 6, 7,
+            'V', view.tag, static_cast<uint8_t>(offset),
+            static_cast<uint8_t>(length), 0, 0,
+        };
+        const std::vector<uint8_t> expected(bytes.begin() + 4 + offset,
+                                            bytes.begin() + 4 + offset + length);
+        const v8serial::DecodedValue decoded = v8serial::Reader(bytes).read();
+        assert(decoded.type == (view.type == Type::Uint8Array
+                                    ? v8serial::DecodedType::Uint8Array
+                                    : v8serial::DecodedType::ArrayBufferView));
+        assert(decoded.view_type == view.type);
+        for (uint8_t& byte : bytes) byte = 0xff;
+        assert(decoded.binary == expected);
+      }
+    }
+  }
+
+  std::vector<uint8_t> bytes = {0xff, 0x0f, 'B', 3, 0, 1, 0, 0};
+  const v8serial::DecodedValue decoded = v8serial::Reader(bytes).read();
+  bytes[5] = 9;
+  assert(decoded.type == v8serial::DecodedType::ArrayBuffer);
+  assert(decoded.binary == std::vector<uint8_t>({0, 1, 0}));
+
+  for (bool with_view : {false, true}) {
+    std::vector<uint8_t> empty = {0xff, 0x0f, 'B', 0};
+    if (with_view) empty.insert(empty.end(), {'V', 'B', 0, 0, 0});
+    assert(v8serial::Reader(empty).read().binary.empty());
+  }
+}
+
+void TestNativeViewValidation() {
+  const std::vector<uint8_t> valid = {
+      0xff, 0x0f, 'B', 4, 1, 2, 3, 4, 'V', 'w', 0, 4, 0,
+  };
+  const std::vector<std::vector<uint8_t>> invalid = {
+      {0xff, 0x0f, 'B', 4, 1, 2, 3},
+      {0xff, 0x0f, 'B', 4, 1, 2, 3, 4, 'V', 'B', 5, 0, 0},
+      {0xff, 0x0f, 'B', 4, 1, 2, 3, 4, 'V', 'B', 3, 2, 0},
+      {0xff, 0x0f, 'B', 4, 1, 2, 3, 4, 'V', 'w', 1, 2, 0},
+      {0xff, 0x0f, 'B', 4, 1, 2, 3, 4, 'V', 'w', 0, 3, 0},
+      {0xff, 0x0f, 'B', 4, 1, 2, 3, 4, 'V', 'B', 0, 4, 1},
+      {0xff, 0x0f, 'B', 4, 1, 2, 3, 4, 'V', '!', 0, 4, 0},
+  };
+  for (const auto& bytes : invalid) {
+    ExpectThrows<v8serial::DecodeError>(
+        [&] { v8serial::Reader(bytes).read(); });
+  }
+  for (size_t length = 9; length < valid.size(); ++length) {
+    ExpectThrows<v8serial::DecodeError>(
+        [&] { v8serial::Reader(valid.data(), length).read(); });
+  }
 }
 
 void TestExtendedScalarsAndViews() {
@@ -262,7 +463,12 @@ int main() {
   TestWriterAndReaderRoundTrip();
   TestWriterInvariants();
   TestReaderValidation();
+  TestStreamingRows();
+  TestStreamingRowsValidation();
+  TestStreamingStringViews();
   TestNativeViewWithOffset();
+  TestNativeViewRangesAndOwnership();
+  TestNativeViewValidation();
   TestExtendedScalarsAndViews();
   TestLongStringPaths();
   TestWriterResetReuse();

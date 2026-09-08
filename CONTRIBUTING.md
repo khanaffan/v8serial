@@ -25,6 +25,14 @@ npm test
 Pull requests should explain the problem, the chosen approach, and any
 compatibility or performance impact. Link related issues when applicable.
 
+For string-path changes, build with `npm run build`, then run
+`build/Release/v8serial_native_bench --strings` (add `.exe` on Windows).
+This covers short strings, SIMD boundaries, long Latin-1 strings, and UTF-16
+fallbacks with a non-Latin-1 character at either end. Output columns are the
+scenario, encode ns, decode ns, and wire bytes. The corresponding
+`v8serial_native_bench_scalar --strings` executable disables both explicit SIMD
+and compiler loop vectorization; it is not an autovectorized baseline.
+
 ## Reporting issues
 
 Before opening an issue, check the existing issues and confirm the problem with

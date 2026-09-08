@@ -1,6 +1,6 @@
 {
   "name": "v8serial",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "V8 serialization-format reader and writer for C++ without linking V8",
   "license": "MIT",
   "private": true,
@@ -15,6 +15,7 @@
     "probe": "node test/format_probe.js",
     "prebench": "npm run build",
     "bench": "node --expose-gc bench/bench.js",
+    "bench:boundary": "npm run build --silent && node --expose-gc bench/boundary_bench.js",
     "bench:render": "node bench/bench.js --render-only"
   },
   "dependencies": {

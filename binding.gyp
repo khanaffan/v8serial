@@ -35,6 +35,30 @@
       }
     },
     {
+      "target_name": "v8serial_bench_napi",
+      "sources": [ "bench/boundary_addon.cc" ],
+      "include_dirs": [
+        "<!@(node -p \"require('node-addon-api').include\")",
+        "include"
+      ],
+      "dependencies": [
+        "<!(node -p \"require('node-addon-api').gyp\")"
+      ],
+      "defines": [ "NAPI_CPP_EXCEPTIONS" ],
+      "cflags_cc": [ "-std=c++17", "-O3", "-fexceptions" ],
+      "xcode_settings": {
+        "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
+        "GCC_OPTIMIZATION_LEVEL": "3",
+        "GCC_ENABLE_CPP_EXCEPTIONS": "YES"
+      },
+      "msvs_settings": {
+        "VCCLCompilerTool": {
+          "ExceptionHandling": 1,
+          "Optimization": 2
+        }
+      }
+    },
+    {
       "target_name": "v8serial_native_bench",
       "type": "executable",
       "sources": [ "bench/native_bench.cc" ],

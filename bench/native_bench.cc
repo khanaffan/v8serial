@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "v8serial/reader.hpp"
@@ -165,6 +166,18 @@ std::vector<uint8_t> EncodeLatin1() {
   return writer.take();
 }
 
+template <size_t Length, size_t NonLatin1 = Length>
+std::vector<uint8_t> EncodeString() {
+  static const std::u16string text = [] {
+    std::u16string value(Length, u'\xe9');
+    if (NonLatin1 < Length) value[NonLatin1] = u'\u0100';
+    return value;
+  }();
+  v8serial::Writer writer(text.size() + 16);
+  writer.string(text);
+  return writer.take();
+}
+
 std::vector<uint8_t> EncodeBlob(size_t size) {
   const std::vector<uint8_t>& blob = Blob(size);
   v8serial::Writer writer(size + 32);
@@ -263,7 +276,33 @@ void Run(const Scenario& scenario) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--strings") {
+    const Scenario strings[] = {
+        {"latin1-0", EncodeString<0>, 100000},
+        {"latin1-1", EncodeString<1>, 100000},
+        {"latin1-7", EncodeString<7>, 100000},
+        {"latin1-8", EncodeString<8>, 100000},
+        {"latin1-15", EncodeString<15>, 100000},
+        {"latin1-16", EncodeString<16>, 100000},
+        {"latin1-31", EncodeString<31>, 100000},
+        {"latin1-32", EncodeString<32>, 100000},
+        {"latin1-33", EncodeString<33>, 100000},
+        {"latin1-64", EncodeString<64>, 100000},
+        {"latin1-4k", EncodeString<4096>, 50000},
+        {"latin1-64k", EncodeString<65536>, 5000},
+        {"utf16-first-33", EncodeString<33, 0>, 100000},
+        {"utf16-last-33", EncodeString<33, 32>, 100000},
+        {"utf16-first-4k", EncodeString<4096, 0>, 50000},
+        {"utf16-last-4k", EncodeString<4096, 4095>, 50000},
+    };
+    for (const Scenario& scenario : strings) Run(scenario);
+    return sink == 0 ? 1 : 0;
+  }
+  if (argc != 1) {
+    std::cerr << "usage: v8serial_native_bench [--strings]\n";
+    return 1;
+  }
   const Scenario scenarios[] = {
       {"scalar", EncodeScalar, 500000},
       {"point3d", EncodePoint3d, 200000},

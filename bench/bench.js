@@ -7,6 +7,7 @@ const { execFileSync } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 const v8 = require('node:v8');
 const { decodeSync, encodeSync } = require('..');
+const { runBoundaryBenchmarks } = require('./boundary_bench');
 
 const root = path.resolve(__dirname, '..');
 const nativeExecutable = (target) =>
@@ -316,6 +317,162 @@ ${panel('wire_bytes', top + (panelHeight + panelGap) * 2, 'Wire size', formatByt
 `;
 }
 
+function renderBoundarySection(boundaryReport) {
+  const results = boundaryReport?.results ?? [];
+  if (results.length === 0) return [];
+
+  const lines = [
+    '## Bulk JavaScript/native boundary',
+    '',
+    'This suite models bulk tabular import across N-API. Every arm consumes the same positional scalar rows and native checksum work. Row construction is outside the timed operation. Serialized totals include `v8.serialize()`; native operation timings do not.',
+    '',
+    '[iTwin/imodel-native#1566](https://github.com/iTwin/imodel-native/pull/1566) motivated the workload: its 1,000,142-row CSV import reached 502,135 end-to-end rows/s through one serialized buffer and 954,372 rows/s through native file streaming, versus 56,812 rows/s through repeated `ECSqlWriteStatement` calls.',
+    '',
+  ];
+
+  const bulkOrder = [
+    'per-cell',
+    'per-row',
+    'bulk-array-generic',
+    'bulk-array-optimized',
+    'bulk-object',
+    'serialized-tree',
+    'serialized-stream-copy',
+    'serialized-stream-borrow',
+    'native',
+  ];
+  for (const columns of [5, 12]) {
+    const rows = results.filter(
+      (result) => result.kind === 'bulk' && result.columns === columns,
+    );
+    if (rows.length === 0) continue;
+    lines.push(
+      `### ${rows[0].rows.toLocaleString('en-US')} rows x ${columns} columns`,
+      '',
+      '| Transfer shape | Native operation | `v8.serialize()` | Serialization-inclusive | Rows/s | Values/s | Peak RSS | CV |',
+      '|---|---:|---:|---:|---:|---:|---:|---:|',
+    );
+    for (const arm of bulkOrder) {
+      const row = rows.find((candidate) => candidate.arm === arm);
+      if (!row) continue;
+      lines.push(
+        `| ${row.label} | ${formatTime(row.operation_ns)} | ${row.serialize_ns === 0 ? '—' : formatTime(row.serialize_ns)} | ${formatTime(row.total_ns)} | ${Math.round(row.end_to_end_rows_per_second).toLocaleString('en-US')} | ${Math.round((row.values * 1e9) / row.total_ns).toLocaleString('en-US')} | ${formatBytes(row.max_rss_kib * 1024)} | ${(row.cv * 100).toFixed(1)}% |`,
+      );
+    }
+    lines.push('');
+  }
+
+  const largeRows = results.filter((result) => result.kind === 'large');
+  if (largeRows.length > 0) {
+    lines.push(
+      `### ${largeRows[0].rows.toLocaleString('en-US')} rows x 5 columns`,
+      '',
+      'The million-row case excludes object traversal and owning-tree decoding to keep peak memory bounded. Those costs are characterized by the 100,000-row matrix above.',
+      '',
+      '| Transfer shape | Native operation | `v8.serialize()` | Serialization-inclusive | Rows/s | Values/s | Peak RSS | CV |',
+      '|---|---:|---:|---:|---:|---:|---:|---:|',
+    );
+    for (const arm of bulkOrder) {
+      const row = largeRows.find((candidate) => candidate.arm === arm);
+      if (!row) continue;
+      lines.push(
+        `| ${row.label} | ${formatTime(row.operation_ns)} | ${row.serialize_ns === 0 ? '—' : formatTime(row.serialize_ns)} | ${formatTime(row.total_ns)} | ${Math.round(row.end_to_end_rows_per_second).toLocaleString('en-US')} | ${Math.round((row.values * 1e9) / row.total_ns).toLocaleString('en-US')} | ${formatBytes(row.max_rss_kib * 1024)} | ${(row.cv * 100).toFixed(1)}% |`,
+      );
+    }
+    lines.push('');
+  }
+
+  const representative = (arm) =>
+    results.find(
+      (result) =>
+        result.kind === 'bulk' &&
+        result.columns === 12 &&
+        result.arm === arm,
+    );
+  const perRow = representative('per-row');
+  const generic = representative('bulk-array-generic');
+  const objects = representative('bulk-object');
+  const tree = representative('serialized-tree');
+  const copied = representative('serialized-stream-copy');
+  const borrowed = representative('serialized-stream-borrow');
+  if (perRow && generic && objects && tree && copied && borrowed) {
+    lines.push(
+      '### Measured conclusions',
+      '',
+      `- Streaming borrowed scalars made native consumption ${(tree.operation_ns / borrowed.operation_ns).toFixed(1)}x faster than constructing an owning value tree and reduced peak RSS from ${formatBytes(tree.max_rss_kib * 1024)} to ${formatBytes(borrowed.max_rss_kib * 1024)}.`,
+      `- Including \`v8.serialize()\`, streaming rows were ${(generic.operation_ns / borrowed.total_ns).toFixed(1)}x faster than validated nested-array traversal and ${(objects.operation_ns / borrowed.total_ns).toFixed(1)}x faster than object traversal.`,
+      `- Borrowing instead of copying the serialized buffer measured ${formatLatencyChange(copied.operation_ns, borrowed.operation_ns)} native latency and reduced peak RSS from ${formatBytes(copied.max_rss_kib * 1024)} to ${formatBytes(borrowed.max_rss_kib * 1024)}.`,
+      `- The synthetic per-row variadic baseline completed in ${formatTime(perRow.operation_ns)}, versus ${formatTime(borrowed.total_ns)} including serialization. Serialization becomes compelling when it also removes higher-level wrapper, property lookup, binding, or statement-call costs; the checksum-only benchmark does not model those database costs.`,
+      '',
+    );
+  }
+
+  const largeBorrowed = largeRows.find(
+    (result) => result.arm === 'serialized-stream-borrow',
+  );
+  if (largeBorrowed) {
+    lines.push(
+      `For the million-row case, streaming native decoding took ${formatTime(largeBorrowed.operation_ns)}, while \`v8.serialize()\` took ${formatTime(largeBorrowed.serialize_ns)} and dominated the ${formatTime(largeBorrowed.total_ns)} serialization-inclusive total.`,
+      '',
+    );
+  }
+
+  const arityRows = results.filter((result) => result.kind === 'arity');
+  if (arityRows.length > 0) {
+    lines.push(
+      '### Function arity with a fixed scalar count',
+      '',
+      'Each row width processes approximately the same total number of scalar values. The per-cell arm performs one N-API call per value plus one step call per row; the per-row arm performs one variadic N-API call plus one step call per row.',
+      '',
+      '| Columns per row | Rows | Per-cell values/s | Per-row values/s | Per-row speedup |',
+      '|---:|---:|---:|---:|---:|',
+    );
+    for (const columns of [1, 5, 12, 32]) {
+      const perCell = arityRows.find(
+        (row) => row.columns === columns && row.arm === 'per-cell',
+      );
+      const perRow = arityRows.find(
+        (row) => row.columns === columns && row.arm === 'per-row',
+      );
+      if (!perCell || !perRow) continue;
+      lines.push(
+        `| ${columns} | ${perCell.rows.toLocaleString('en-US')} | ${Math.round(perCell.values_per_second).toLocaleString('en-US')} | ${Math.round(perRow.values_per_second).toLocaleString('en-US')} | ${(perRow.values_per_second / perCell.values_per_second).toFixed(2)}x |`,
+      );
+    }
+    lines.push('');
+  }
+
+  const fixedCallRows = results.filter(
+    (result) => result.kind === 'arity-fixed-calls',
+  );
+  if (fixedCallRows.length > 0) {
+    lines.push(
+      '### Function arity with a fixed call count',
+      '',
+      'This isolates the marginal cost of adding arguments while keeping the number of variadic N-API calls and step calls constant.',
+      '',
+      '| Arguments per call | Calls | Time per row call | Values/s |',
+      '|---:|---:|---:|---:|',
+    );
+    for (const columns of [1, 5, 12, 32]) {
+      const row = fixedCallRows.find(
+        (candidate) => candidate.columns === columns,
+      );
+      if (!row) continue;
+      lines.push(
+        `| ${columns} | ${row.rows.toLocaleString('en-US')} | ${formatTime(row.operation_ns / row.rows)} | ${Math.round(row.values_per_second).toLocaleString('en-US')} |`,
+      );
+    }
+    lines.push('');
+  }
+
+  lines.push(
+    'The native-generated row arm is a ceiling, not an equivalent application path: it omits JavaScript row construction and any need for JavaScript-side transformation. The owning-tree arm uses `Reader::read()`. The streaming arms use `Reader::readRows()` and pass borrowed string spans directly to the native consumer.',
+    '',
+  );
+  return lines;
+}
+
 function renderMarkdown(report) {
   const result = (scenario, codec) =>
     report.results.find(
@@ -365,6 +522,11 @@ function renderMarkdown(report) {
     '- `JSON base64` preserves Uint8Array using base64 text and includes conversion in both timings.',
     '- Results are machine-specific; regenerate with `npm run bench`.',
     '- The C++ reader returns owning strings and byte vectors. Node may reconstruct a host-object typed array as a view into the serialized input, so its large-blob decode has different ownership semantics.',
+    ...(report.boundary
+      ? [
+          `- Bulk boundary cases run in fresh child processes with ${report.boundary.environment.samples} samples per arm. Peak RSS is the child process high-water mark; CV is the coefficient of variation of native-operation samples.`,
+        ]
+      : []),
     '',
     '## Highlights',
     '',
@@ -378,8 +540,15 @@ function renderMarkdown(report) {
           `- On this run, reusing one reserved \`Writer\` with \`reset()\` measured ${formatLatencyChange(scalarReuse.fresh_ns, scalarReuse.reused_ns)} latency for scalar encoding and ${formatLatencyChange(geometryReuse.fresh_ns, geometryReuse.reused_ns)} for nested geometry versus constructing and destroying a writer for every message.`,
         ]
       : []),
+    ...(report.boundary
+      ? [
+          '- The bulk boundary suite separates N-API call amplification, nested object traversal, buffer copying, owning-tree allocation, and streaming scalar consumption instead of attributing all costs to serialization.',
+        ]
+      : []),
     '',
   ];
+
+  lines.push(...renderBoundarySection(report.boundary));
 
   if (writerReuse.length > 0) {
     const labels = new Map([
@@ -522,6 +691,8 @@ const writerReuse = nativeOutputs.flatMap((output) =>
   })),
 );
 
+const boundary = runBoundaryBenchmarks();
+
 const report = {
   environment: {
     generated_at: new Date().toISOString(),
@@ -540,6 +711,7 @@ const report = {
   })),
   results,
   writer_reuse: writerReuse,
+  boundary,
 };
 
 writeReport(report);
